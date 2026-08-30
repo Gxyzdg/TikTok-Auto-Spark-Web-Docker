@@ -1,0 +1,36 @@
+# 依赖
+node_modules/
+
+# 构建产物
+dist/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# 运行时持久化的定时任务与配置（含管理员密码哈希）
+tasks.json
+config.json
+
+# 本地快照/备份（体积大，不入库）
+backup/
+
+# 系统 / 日志
+.DS_Store
+*.log
+
+# 环境变量
+.env
+.env.*
+
+# 本机工具/会话目录
+.docker-config/
+.dsh-vision-router/
+.dsh-vision-router
+.idea/
+.vscode/
+
+# 本地交付物（打包文件 / Docker Hub 描述），不入库
+tiktok-spark-source.zip
+tiktok-spark-docker-src.tar.gz
+dockerhub-description.md

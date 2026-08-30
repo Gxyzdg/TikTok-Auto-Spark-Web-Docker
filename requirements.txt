@@ -1,0 +1,6 @@
+# 抖音火花助手后端依赖
+fastapi
+uvicorn[standard]
+selenium
+schedule
+requests

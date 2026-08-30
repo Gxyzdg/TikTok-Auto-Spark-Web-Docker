@@ -1,0 +1,514 @@
+/* ============================================================
+   抖音火花助手 · 全局设计系统
+   现代 / 清晰 / 易读
+   ============================================================ */
+
+:root {
+  /* 品牌色（火花·火焰橙红） */
+  --primary: #e8481e;
+  --primary-strong: #c93914;
+  --primary-soft: #fdeae4;
+  --gradient: linear-gradient(135deg, #ff8a3d 0%, #ff4d5e 100%);
+  --gradient-soft: linear-gradient(135deg, #fff5ef 0%, #ffeef1 100%);
+
+  /* 中性色 */
+  --bg: #f5f6f8;
+  --surface: #ffffff;
+  --surface-2: #fafbfc;
+  --text-1: #1a1d24;
+  --text-2: #5c6470;
+  --text-3: #9aa1ad;
+  --border: #eceef2;
+  --border-strong: #e2e5ea;
+
+  /* 状态色 */
+  --success: #16a34a;
+  --success-bg: #e9f9ef;
+  --warning: #f59e0b;
+  --warning-bg: #fff7e6;
+  --danger: #ef4444;
+  --danger-bg: #feecec;
+  --info: #3b82f6;
+  --info-bg: #eaf2fe;
+
+  /* 字体 */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue",
+    Arial, sans-serif;
+
+  /* 圆角 */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+
+  /* 阴影 */
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.05);
+  --shadow-md: 0 2px 10px rgba(16, 24, 40, 0.06);
+  --shadow-lg: 0 10px 30px rgba(16, 24, 40, 0.10);
+
+  /* Element Plus 主题变量覆盖 */
+  --el-color-primary: #e8481e;
+  --el-color-primary-light-3: #ef6f52;
+  --el-color-primary-light-5: #f3987f;
+  --el-color-primary-light-7: #f7bfae;
+  --el-color-primary-light-8: #f9d2c5;
+  --el-color-primary-light-9: #fdeae4;
+  --el-color-primary-dark-2: #c93914;
+  --el-border-radius-base: 8px;
+  --el-font-family: var(--font-sans);
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  width: 100%;
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-sans);
+  color: var(--text-1);
+  background: var(--bg);
+  font-size: 14px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+a {
+  color: var(--primary);
+  text-decoration: none;
+}
+
+/* 精致滚动条 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: #d4d8df;
+  border-radius: 8px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #bfc4cd;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ---------- Element Plus 细节统一 ---------- */
+.el-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg) !important;
+  box-shadow: var(--shadow-sm) !important;
+}
+
+.el-card__header {
+  padding: 18px 22px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+}
+
+.el-card__body {
+  padding: 22px;
+}
+
+.el-table {
+  --el-table-header-bg-color: var(--surface-2);
+  --el-table-header-text-color: var(--text-2);
+  --el-table-border-color: var(--border);
+  font-size: 14px;
+}
+
+.el-table th.el-table__cell {
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.el-button {
+  font-weight: 500;
+}
+
+.el-dialog {
+  border-radius: var(--radius-lg) !important;
+}
+
+.el-dialog__header {
+  padding: 20px 22px 8px;
+}
+
+.el-tag {
+  border-radius: 6px;
+  font-weight: 500;
+}
+
+.el-message-box {
+  border-radius: var(--radius-lg);
+}
+
+/* ---------- 通用工具类 ---------- */
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.page-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.page-header__title {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-1);
+  letter-spacing: -0.01em;
+}
+
+.page-header__subtitle {
+  margin-top: 4px;
+  font-size: 13px;
+  color: var(--text-3);
+}
+
+.page-header__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.toolbar__spacer {
+  flex: 1;
+}
+
+/* ============================================================
+   过渡与动画
+   ============================================================ */
+
+/* 顶层路由过渡（登录页 ↔ 主框架） */
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
+/* 内层页面切换过渡 */
+.page-enter-active,
+.page-leave-active {
+  transition: opacity 0.28s cubic-bezier(0.4, 0, 0.2, 1),
+    transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.page-enter-from {
+  opacity: 0;
+  transform: translateY(16px) scale(0.985);
+}
+.page-leave-to {
+  opacity: 0;
+  transform: translateY(-10px) scale(0.99);
+}
+
+/* 关键帧 */
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(18px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes scaleIn {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes floatY {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-6px);
+  }
+}
+
+/* 入场动画工具类 */
+.animate-fade-in-up {
+  animation: fadeInUp 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.animate-fade-in {
+  animation: fadeIn 0.5s ease both;
+}
+.animate-scale-in {
+  animation: scaleIn 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* 平滑滚动 */
+html {
+  scroll-behavior: smooth;
+}
+
+/* 尊重系统「减少动态效果」偏好 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ============================================================
+   视觉细化
+   ============================================================ */
+
+/* 表格行 hover 平滑过渡 */
+.el-table .el-table__body tr > td {
+  transition: background-color 0.18s ease;
+}
+
+/* 弹窗柔和动画（缩放 + 上移，覆盖 Element Plus 默认） */
+@keyframes dialog-fade-in {
+  0% {
+    transform: translate3d(0, 16px, 0) scale(0.97);
+    opacity: 0;
+  }
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes dialog-fade-out {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1);
+    opacity: 1;
+  }
+  100% {
+    transform: translate3d(0, -12px, 0) scale(0.98);
+    opacity: 0;
+  }
+}
+
+/* 弹窗：应用柔和缩放/上移动画（覆盖 Element Plus 默认） */
+.dialog-fade-enter-active {
+  animation: overlay-fade-in 0.25s ease;
+}
+.dialog-fade-leave-active {
+  animation: overlay-fade-out 0.2s ease;
+}
+.dialog-fade-enter-active .el-overlay-dialog {
+  animation: dialog-fade-in 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.dialog-fade-leave-active .el-overlay-dialog {
+  animation: dialog-fade-out 0.2s ease-in;
+}
+
+@keyframes overlay-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes overlay-fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+/* 空状态细节 */
+.el-empty__image {
+  opacity: 0.9;
+}
+
+.el-empty__description {
+  color: var(--text-3);
+}
+
+/* 数字 / 时间等宽，跳动时不抖动 */
+.stat-value,
+.info-value,
+.next-run {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 暗色模式令牌 */
+html.dark {
+  --bg: #101216;
+  --surface: #191d24;
+  --surface-2: #21262f;
+  --text-1: #e6e9ef;
+  --text-2: #a6aebc;
+  --text-3: #6d7684;
+  --border: #2a303b;
+  --border-strong: #38404c;
+  --primary-soft: rgba(232, 72, 30, 0.15);
+  --success-bg: rgba(34, 197, 94, 0.14);
+  --warning-bg: rgba(245, 158, 11, 0.14);
+  --danger-bg: rgba(239, 68, 68, 0.14);
+  --info-bg: rgba(59, 130, 246, 0.14);
+  color-scheme: dark;
+}
+
+/* ============================================================
+   可访问性
+   ============================================================ */
+
+/* 键盘焦点可见样式 */
+a:focus-visible,
+button:focus-visible,
+[role='button']:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* ============================================================
+   流畅度增强
+   ============================================================ */
+
+/* 主题切换时颜色平滑过渡（暗/亮模式不再硬切换） */
+body,
+.header,
+.el-dialog,
+.el-message-box,
+.el-dropdown-menu,
+.el-table,
+.panel {
+  transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease;
+}
+
+/* 按钮微交互：按压缩放 + 平滑过渡 */
+.el-button {
+  transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease,
+    box-shadow 0.2s ease, transform 0.2s ease;
+}
+.el-button:not(.is-link):not(.is-text):not(.is-disabled):active {
+  transform: scale(0.97);
+}
+
+/* 输入框聚焦平滑 */
+.el-input__wrapper,
+.el-textarea__inner {
+  transition: box-shadow 0.2s ease, background-color 0.2s ease;
+}
+
+/* 表单校验错误：统一为单个红色错误框（不被自定义聚焦样式覆盖，避免出现"双红框/错位"）
+   覆盖 input / textarea / select 及其聚焦态 */
+.el-form-item.is-error .el-form-item__content .el-input__wrapper,
+.el-form-item.is-error .el-form-item__content .el-input__wrapper.is-focus,
+.el-form-item.is-error .el-form-item__content .el-textarea__inner,
+.el-form-item.is-error .el-form-item__content .el-textarea__inner.is-focus,
+.el-form-item.is-error .el-form-item__content .el-select__wrapper,
+.el-form-item.is-error .el-form-item__content .el-select__wrapper.is-focus {
+  box-shadow: 0 0 0 1px var(--danger) inset !important;
+}
+
+/* 卡片悬浮柔和抬升 */
+.el-card {
+  transition: transform 0.25s ease, box-shadow 0.25s ease, background-color 0.3s ease,
+    border-color 0.3s ease;
+}
+.el-card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+
+/* 表格加载骨架屏 */
+.table-skeleton {
+  padding: 6px 8px;
+}
+
+/* 渐变动画（欢迎横幅等使用） */
+@keyframes gradientShift {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+/* 级联入场工具类 */
+.stagger > * {
+  animation: fadeInUp 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.stagger > *:nth-child(1) {
+  animation-delay: 0.02s;
+}
+.stagger > *:nth-child(2) {
+  animation-delay: 0.07s;
+}
+.stagger > *:nth-child(3) {
+  animation-delay: 0.12s;
+}
+.stagger > *:nth-child(4) {
+  animation-delay: 0.17s;
+}
+.stagger > *:nth-child(5) {
+  animation-delay: 0.22s;
+}
+.stagger > *:nth-child(6) {
+  animation-delay: 0.27s;
+}
+
+/* 消息提示呼吸感 */
+@keyframes softPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.72;
+  }
+}
