@@ -19,6 +19,7 @@ export default defineConfig({
         // 可用环境变量 VITE_API_PROXY 覆盖后端地址（构建/运行时注入）
         target: process.env.VITE_API_PROXY || 'http://localhost:9844',
         changeOrigin: true,
+        ws: true,  // 远程画面（CDP 串流）走 WebSocket，本地调试需要
         rewrite: (path) => path.replace(/^\/api/, '')
       }
     }

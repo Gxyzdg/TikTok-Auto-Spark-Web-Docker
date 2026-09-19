@@ -6,12 +6,17 @@ from selenium.common.exceptions import NoSuchElementException
 from selenium.common.exceptions import SessionNotCreatedException
 from selenium.webdriver.common.by import By
 import schedule, requests
-import time, uvicorn
+import time, uvicorn, asyncio, urllib.request
 from datetime import datetime, timezone
 import json, base64, os, platform, subprocess
-from fastapi import FastAPI, Header, Request, Body
+from fastapi import FastAPI, Header, Request, Body, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 import threading, hashlib, secrets
+
+try:  # CDP 画面串流用（uvicorn[standard] 已包含，这里做防御性导入）
+    import websockets
+except Exception:  # pragma: no cover
+    websockets = None
 
 # 常用环境变量（均有默认值，一般无需配置；Docker 镜像已内置）：
 #   HOST / PORT          监听地址与端口（默认 localhost:9844）
@@ -545,6 +550,11 @@ def _scheduled_send(name, text):
     if not (init and _driver_alive()):
         log(f'⏭️ 定时任务跳过（浏览器未初始化）→ 好友：{name}｜请先在首页点击「初始化浏览器」')
         return
+    # 有人正在网页端远程操作（登录向导里的二次验证）时让路，避免打断人工操作
+    if remote_control_active():
+        log(f'⏭️ 定时任务跳过（正在远程操作浏览器/人工验证中）→ 好友：{name}｜本次不再重试')
+        return
+    _dismiss_browser_dialogs('定时任务执行前')
     log(f'⏰ 定时任务触发 → 好友：{name}')
     try:
         out = douyin.Send_Frinder(name, text)
@@ -674,6 +684,11 @@ def _create_browser_locked():
         driver = new_driver
         douyin = Douyin(driver)
         init = True
+        # 抖音页面加载后会尝试拉起 App，可能出现模态确认框（会吞掉页面输入），
+        # 这里在几秒内多清几次，确保进入可用状态
+        for _delay in (1.0, 2.5, 5.0):
+            time.sleep(_delay)
+            _dismiss_browser_dialogs('初始化后')
         # 无窗口管理器环境：主动把抖音窗口置顶并移到 (0,0)，避免被其它窗口（如 VNC 里的前端浏览器）遮挡
         try:
             subprocess.run(
@@ -825,20 +840,26 @@ def PngLogin(authorization: str = Header(None)):
     if init_err:
         return init_err
     global Login_is_bool
-    with driver_lock:
-        if driver.get_cookies():
-            driver.refresh()
-            try:
-                login_type_element = driver.find_element(By.XPATH, '//*[@id="douyin_login_comp_flat_panel"]/picture')
-                login_type = login_type_element.text
+    try:
+        with driver_lock:
+            if driver.get_cookies():
                 driver.refresh()
-                return {'code': 200, 'data': 'No'}
-            except NoSuchElementException:
-                Login_is_bool = True
-                log('🔑 登录状态变更：Cookie 登录成功')
-                return {'code': 200, 'data': 'ok'}
-        else:
-            return {'code': 200, 'data': 'No'}  # # @#z
+                try:
+                    login_type_element = driver.find_element(By.XPATH, '//*[@id="douyin_login_comp_flat_panel"]/picture')
+                    login_type = login_type_element.text
+                    driver.refresh()
+                    return {'code': 200, 'data': 'No'}
+                except NoSuchElementException:
+                    Login_is_bool = True
+                    log('🔑 登录状态变更：Cookie 登录成功')
+                    return {'code': 200, 'data': 'ok'}
+            else:
+                return {'code': 200, 'data': 'No'}  # # @#z
+    except Exception as e:
+        # 页面处于异常状态（驱动异常/页面崩溃）时自动刷新页面恢复
+        log(f'♻️ 扫码登录检测异常（{e}），自动刷新页面')
+        _recover_douyin_page('扫码登录检测异常')
+        return {'code': 200, 'data': 'No', 'msg': '页面已自动刷新，请重新点击扫码登录'}
 
 
 @app.get('/Api/GetLogin')  # 获取登录
@@ -858,31 +879,44 @@ def GetLoginPng(authorization: str = Header(None)):
     init_err = require_init()
     if init_err:
         return init_err
-    try:
-        with driver_lock:
-            Douyin.LoginInit(douyin)
-            try:
-                error = driver.find_element(By.XPATH, '//*[@id="animate_qrcode_container"]/div[2]/div/p[1]')
-                img_element = driver.find_element(By.XPATH, '//*[@id="animate_qrcode_container"]/div[2]/img')
-                img_element.click()
-            except:
-                pass
-            img_element = driver.find_element(By.XPATH, '//*[@id="animate_qrcode_container"]/div[2]/img')
-            login_src = img_element.get_attribute('src')
-            try:
-                is_rust = driver.find_element(By.XPATH, '//*[@id="animate_qrcode_container"]/div[2]/div')
-                is_rust.click()
-                time.sleep(5)
+    last_error = ''
+    # 最多两次：第一次失败会自动刷新页面再试一次
+    for attempt in (1, 2):
+        try:
+            with driver_lock:
+                Douyin.LoginInit(douyin)
+                try:
+                    driver.find_element(By.XPATH, '//*[@id="animate_qrcode_container"]/div[2]/div/p[1]')
+                    img_element = driver.find_element(By.XPATH, '//*[@id="animate_qrcode_container"]/div[2]/img')
+                    img_element.click()
+                except Exception:
+                    pass
                 img_element = driver.find_element(By.XPATH, '//*[@id="animate_qrcode_container"]/div[2]/img')
                 login_src = img_element.get_attribute('src')
-            except:
-                pass
-            if login_src:
-                return {'code': 200, 'data': login_src}
-            else:
-                return {'code': 404, 'data': 'cant find LoginPng src attribute'}
-    except NoSuchElementException:
-        return {'code': 404, 'data': 'cant find img element'}
+                try:
+                    is_rust = driver.find_element(By.XPATH, '//*[@id="animate_qrcode_container"]/div[2]/div')
+                    is_rust.click()
+                    time.sleep(5)
+                    img_element = driver.find_element(By.XPATH, '//*[@id="animate_qrcode_container"]/div[2]/img')
+                    login_src = img_element.get_attribute('src')
+                except Exception:
+                    pass
+                if login_src:
+                    if attempt == 2:
+                        log('♻️ 自动刷新页面后成功获取登录二维码')
+                    return {'code': 200, 'data': login_src}
+                last_error = 'cant find LoginPng src attribute'
+        except NoSuchElementException:
+            last_error = 'cant find img element'
+        except Exception as e:
+            last_error = str(e)
+
+        # 第一次失败：自动刷新页面（恢复异常状态）后重试
+        if attempt == 1:
+            log(f'♻️ 获取登录二维码失败（{last_error}），自动刷新页面后重试…')
+            _recover_douyin_page('二维码获取失败')
+
+    return {'code': 404, 'data': f'获取登录二维码失败（已自动刷新页面重试）：{last_error or "页面异常"}'}
 
 
 @app.post('/Api/login/Init/GetCooker')  # 获取cooke
@@ -1120,6 +1154,350 @@ def GetScrlk(authorization: str = Header(None)):
         return {'code': 200, 'data': img_data}
     except Exception as e:
         return {'code': 400, 'data': f'截图错误:{e}'}
+
+
+# ============================================================
+# 远程画面（CDP 画面串流 + 输入转发）—— 登录向导使用
+#
+# 不依赖 noVNC：直接通过 Chromium 的 DevTools 协议把画面（JPEG 帧）推给网页，
+# 并把网页上的鼠标/键盘事件用 Input.* 命令回放到浏览器（trusted 事件，
+# 画面里可直接点击完成二次验证）。DevTools 端口由 chromedriver 分配且仅监听 127.0.0.1。
+# ============================================================
+_screen_tickets = {}                 # 一次性连接票据 -> 过期时间戳
+_screen_tickets_lock = threading.Lock()
+_remote_control_lock = threading.Lock()
+_remote_control_active = False       # 是否有人正在网页端远程操作浏览器
+_SCREEN_TICKET_TTL = 30              # 票据有效期（秒）
+_cdp_msg_id = 0
+_cdp_id_lock = threading.Lock()
+
+
+def _cdp_id():
+    global _cdp_msg_id
+    with _cdp_id_lock:
+        _cdp_msg_id += 1
+        return _cdp_msg_id
+
+
+def _issue_screen_ticket():
+    ticket = secrets.token_urlsafe(24)
+    now = time.time()
+    with _screen_tickets_lock:
+        for key in [k for k, exp in _screen_tickets.items() if exp < now]:
+            _screen_tickets.pop(key, None)
+        _screen_tickets[ticket] = now + _SCREEN_TICKET_TTL
+    return ticket
+
+
+def _consume_screen_ticket(ticket):
+    """票据一次性使用：校验通过即删除（WebSocket 握手无法携带 Authorization 头）。"""
+    if not ticket:
+        return False
+    with _screen_tickets_lock:
+        exp = _screen_tickets.pop(ticket, None)
+    return bool(exp and exp >= time.time())
+
+
+def _set_remote_active(active):
+    global _remote_control_active
+    with _remote_control_lock:
+        _remote_control_active = bool(active)
+
+
+def remote_control_active():
+    """有人远程操作时，定时任务应让路（否则会打断人工验证）。"""
+    with _remote_control_lock:
+        return _remote_control_active
+
+
+def _vnc_enabled():
+    return os.environ.get('VNC_ENABLED', '1').strip().lower() not in ('0', 'false', 'no', 'off')
+
+
+def _dismiss_browser_dialogs(reason=''):
+    """清掉 Chromium 的模态弹窗（如"是否允许打开 xdg-open"的外部协议框）。
+
+    抖音页面会尝试用 snssdk1128:// 之类的自定义协议拉起 App，Chromium 默认弹出**模态**确认框；
+    该弹窗会吞掉页面上的所有鼠标/键盘输入（远程操作与自动化都会被卡住），必须主动清掉。
+    弹窗属于浏览器 UI，CDP 的 Input.* 打不到它，所以用 xdotool 在 X 层发 Esc。
+    """
+    if not SHOW_BROWSER or not os.environ.get('DISPLAY'):
+        return
+    try:
+        # 必须先把浏览器窗口激活，否则 Esc 落到别的窗口上不起作用
+        subprocess.run(['xdotool', 'search', '--name', 'douyin',
+                        'windowactivate', '--sync'],
+                       timeout=5, capture_output=True)
+    except Exception:
+        pass
+    try:
+        subprocess.run(['xdotool', 'key', '--clearmodifiers', 'Escape'],
+                       timeout=5, capture_output=True)
+        if reason:
+            log(f'🧹 已清理浏览器模态弹窗（{reason}）')
+    except Exception:
+        pass
+
+
+DOUYIN_CHAT_URL = 'https://www.douyin.com/chat?isPopup=1'
+
+
+def _recover_douyin_page(reason=''):
+    """页面异常（元素找不到 / 停在别的页面）时把浏览器拉回抖音聊天页并清理模态弹窗。
+
+    用于"获取登录二维码""扫码登录"等操作失败后的自动恢复：
+    先导航回聊天页，再重试一次，避免用户看到 cant find img element 这类报错后无从下手。
+    """
+    try:
+        with driver_lock:
+            driver.get(DOUYIN_CHAT_URL)
+        time.sleep(2)
+        _dismiss_browser_dialogs(reason or '页面恢复')
+        log(f'♻️ 已自动刷新抖音页面（{reason or "页面恢复"}）')
+        return True
+    except Exception as e:
+        log(f'⚠️ 自动刷新页面失败：{e}')
+        return False
+
+
+def _viewport_info():
+    """当前页面视口尺寸（CSS 像素）与缩放系数，前端据此换算鼠标坐标。"""
+    if not (init and _driver_alive()):
+        return None
+    try:
+        with driver_lock:
+            width, height, dpr = driver.execute_script(
+                'return [window.innerWidth, window.innerHeight, window.devicePixelRatio || 1]')
+        return {
+            'width': int(width),
+            'height': int(height),
+            'dpr': float(dpr or 1),
+            'scale': float(SCALE_FACTOR or 1),
+        }
+    except Exception:
+        return None
+
+
+def _page_info():
+    """当前浏览器页面标题与地址（登录向导用于提示"现在画面里是什么"）。"""
+    if not (init and _driver_alive()):
+        return None
+    try:
+        with driver_lock:
+            return {'title': driver.title or '', 'url': driver.current_url or ''}
+    except Exception:
+        return None
+
+
+def _devtools_ws_url():
+    """取当前页面目标的 DevTools WebSocket 地址（用于 CDP 串流与输入回放）。"""
+    try:
+        caps = getattr(driver, 'capabilities', None) or {}
+        addr = str(((caps.get('goog:chromeOptions') or {}).get('debuggerAddress')) or '').strip()
+        if not addr:
+            return None
+        with urllib.request.urlopen(f'http://{addr}/json/list', timeout=5) as resp:
+            targets = json.load(resp)
+        pages = [t for t in targets if t.get('type') == 'page' and t.get('webSocketDebuggerUrl')]
+        if not pages:
+            return None
+        page = next((t for t in pages if 'douyin.com' in str(t.get('url') or '')), pages[0])
+        return page['webSocketDebuggerUrl']
+    except Exception as e:
+        log(f'⚠️ 获取 DevTools 调试地址失败：{e}')
+        return None
+
+
+_KEY_CODES = {
+    'Enter': (13, 'Enter'), 'Tab': (9, 'Tab'), 'Backspace': (8, 'Backspace'),
+    'Escape': (27, 'Escape'), 'Delete': (46, 'Delete'),
+    'ArrowLeft': (37, 'ArrowLeft'), 'ArrowUp': (38, 'ArrowUp'),
+    'ArrowRight': (39, 'ArrowRight'), 'ArrowDown': (40, 'ArrowDown'),
+}
+
+
+def _input_commands(msg):
+    """把前端消息翻译成一组 CDP Input 命令。"""
+    kind = (msg or {}).get('t')
+    if kind == 'mouse':
+        x, y = float(msg.get('x') or 0), float(msg.get('y') or 0)
+        action = msg.get('a')
+        button = msg.get('b') or 'left'
+        if action == 'down':
+            return [{'method': 'Input.dispatchMouseEvent', 'params': {
+                'type': 'mousePressed', 'x': x, 'y': y, 'button': button,
+                'buttons': 1, 'clickCount': 1}}]
+        if action == 'move':
+            # drag=1 表示按住左键拖动：拖动过程中必须保持 buttons=1
+            return [{'method': 'Input.dispatchMouseEvent', 'params': {
+                'type': 'mouseMoved', 'x': x, 'y': y, 'button': 'none',
+                'buttons': 1 if msg.get('drag') else 0}}]
+        if action == 'up':
+            return [{'method': 'Input.dispatchMouseEvent', 'params': {
+                'type': 'mouseReleased', 'x': x, 'y': y, 'button': button,
+                'buttons': 0, 'clickCount': 1}}]
+        return []
+    if kind == 'touch':
+        # 触摸设备（手机/平板）走 CDP 触摸事件，比合成鼠标更贴近真实操作
+        action = msg.get('a')
+        x, y = float(msg.get('x') or 0), float(msg.get('y') or 0)
+        if action == 'start':
+            return [{'method': 'Input.dispatchTouchEvent', 'params': {
+                'type': 'touchStart', 'touchPoints': [{'x': x, 'y': y}]}}]
+        if action == 'move':
+            return [{'method': 'Input.dispatchTouchEvent', 'params': {
+                'type': 'touchMove', 'touchPoints': [{'x': x, 'y': y}]}}]
+        if action == 'end':
+            return [{'method': 'Input.dispatchTouchEvent', 'params': {
+                'type': 'touchEnd', 'touchPoints': []}}]
+        return []
+    if kind == 'wheel':
+        return [{'method': 'Input.dispatchMouseEvent', 'params': {
+            'type': 'mouseWheel', 'x': float(msg.get('x') or 0), 'y': float(msg.get('y') or 0),
+            'deltaX': float(msg.get('dx') or 0), 'deltaY': float(msg.get('dy') or 0)}}]
+    if kind == 'text':
+        text = str(msg.get('text') or '')
+        return [{'method': 'Input.insertText', 'params': {'text': text}}] if text else []
+    if kind == 'key':
+        key = str(msg.get('key') or '')
+        code, name = _KEY_CODES.get(key, (None, None))
+        if code is None:
+            return []
+        return [
+            {'method': 'Input.dispatchKeyEvent', 'params': {
+                'type': 'rawKeyDown', 'key': name, 'code': name,
+                'windowsVirtualKeyCode': code, 'nativeVirtualKeyCode': code}},
+            {'method': 'Input.dispatchKeyEvent', 'params': {
+                'type': 'keyUp', 'key': name, 'code': name,
+                'windowsVirtualKeyCode': code, 'nativeVirtualKeyCode': code}},
+        ]
+    return []
+
+
+@app.get('/Api/Screen/Info')  # 远程画面：可用性与视口信息
+def ScreenInfo(authorization: str = Header(None)):
+    auth_err = require_auth(authorization)
+    if auth_err:
+        return auth_err
+    return {'code': 200, 'data': {
+        'browser': bool(init and _driver_alive()),
+        'viewport': _viewport_info(),
+        'page': _page_info(),
+        'remote_active': remote_control_active(),
+        'vnc_enabled': _vnc_enabled(),
+        'stream_available': websockets is not None,
+    }}
+
+
+@app.get('/Api/Screen/Ticket')  # 远程画面：签发一次性连接票据
+def ScreenTicket(authorization: str = Header(None)):
+    auth_err = require_auth(authorization)
+    if auth_err:
+        return auth_err
+    if websockets is None:
+        return {'code': 500, 'data': '服务端缺少 websockets 依赖，无法建立画面串流'}
+    if not (init and _driver_alive()):
+        return {'code': 400, 'data': '浏览器未初始化，请先在首页点击「初始化浏览器」'}
+    if remote_control_active():
+        return {'code': 409, 'data': '已有其它页面正在远程操作浏览器，请先关闭那个页面'}
+    return {'code': 200, 'data': {'ticket': _issue_screen_ticket(), 'expires_in': _SCREEN_TICKET_TTL}}
+
+
+@app.websocket('/Api/Screen/Stream')  # 远程画面：CDP 画面串流 + 输入转发
+async def ScreenStream(websocket: WebSocket):
+    if not _consume_screen_ticket(websocket.query_params.get('ticket') or ''):
+        await websocket.close(code=4401)  # 票据无效 / 过期 / 已使用
+        return
+    if websockets is None or not (init and _driver_alive()):
+        await websocket.close(code=4400)
+        return
+
+    ws_url = await asyncio.to_thread(_devtools_ws_url)
+    if not ws_url:
+        await websocket.close(code=4404)
+        return
+
+    await websocket.accept()
+    viewport = await asyncio.to_thread(_viewport_info) or {}
+    await websocket.send_json({'t': 'ready', 'viewport': viewport})
+    _set_remote_active(True)
+    await asyncio.to_thread(_dismiss_browser_dialogs, '远程画面会话开始')
+    log('🖥️ 远程画面会话已连接（CDP 串流开始）')
+
+    async def dialog_watchdog():
+        """串流期间定期清弹窗：用户在画面里点击可能再次触发外部协议确认框。"""
+        while True:
+            await asyncio.sleep(3)
+            await asyncio.to_thread(_dismiss_browser_dialogs)
+
+    async def cdp_to_client(cdp):
+        """唯一读取 CDP 连接的任务（同一条连接不允许并发读取，否则帧会被抢走）。"""
+        async for raw in cdp:
+            try:
+                msg = json.loads(raw)
+            except Exception:
+                continue
+            # 命令出错（参数不合法等）只记日志，不影响串流
+            if msg.get('error'):
+                log(f'⚠️ CDP 命令执行出错：{msg.get("error")}')
+                continue
+            if msg.get('method') != 'Page.screencastFrame':
+                continue
+            params = msg.get('params') or {}
+            # 必须先 ack，否则浏览器不会再推下一帧
+            await cdp.send(json.dumps({
+                'id': _cdp_id(), 'method': 'Page.screencastFrameAck',
+                'params': {'sessionId': params.get('sessionId')}}))
+            data = params.get('data')
+            if data:
+                await websocket.send_bytes(base64.b64decode(data))
+
+    async def client_to_cdp(cdp):
+        first = True
+        while True:
+            msg = await websocket.receive_json()
+            cmds = _input_commands(msg)
+            if first:
+                log(f'🖥️ 远程输入通道就绪：首个消息 type={msg.get("t")} → {len(cmds)} 条 CDP 命令')
+                first = False
+            for cmd in cmds:
+                cmd['id'] = _cdp_id()
+                await cdp.send(json.dumps(cmd))
+
+    try:
+        async with websockets.connect(ws_url, max_size=None, open_timeout=10,
+                                      ping_interval=20, ping_timeout=20) as cdp:
+            await cdp.send(json.dumps({'id': _cdp_id(), 'method': 'Page.enable'}))
+            await cdp.send(json.dumps({
+                'id': _cdp_id(), 'method': 'Page.startScreencast',
+                'params': {
+                    'format': 'jpeg', 'quality': 60, 'everyNthFrame': 1,
+                    'maxWidth': int(viewport.get('width') or 1280),
+                    'maxHeight': int(viewport.get('height') or 720),
+                }}))
+            tasks = [asyncio.create_task(cdp_to_client(cdp)),
+                     asyncio.create_task(client_to_cdp(cdp)),
+                     asyncio.create_task(dialog_watchdog())]
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                exc = task.exception() if not task.cancelled() else None
+                if exc:
+                    log(f'⚠️ 远程画面任务异常：{type(exc).__name__}: {exc}')
+            for task in tasks:
+                task.cancel()
+            try:
+                await cdp.send(json.dumps({'id': _cdp_id(), 'method': 'Page.stopScreencast'}))
+            except Exception:
+                pass
+    except Exception as e:
+        log(f'⚠️ 远程画面会话异常：{e}')
+    finally:
+        _set_remote_active(False)
+        log('🖥️ 远程画面会话已结束')
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 
 @app.get('/Api/DieLogin')  # 取消登录

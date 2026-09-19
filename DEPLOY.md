@@ -33,7 +33,8 @@
 |------|--------|------|
 | `VITE_API_PROXY` | `http://localhost:9844` | `npm run dev` 时 `/api` 代理指向的后端地址 |
 | `VITE_API_HOST` | `127.0.0.1:9844` | 首页「系统信息」展示用，仅展示不参与请求 |
-| `VITE_FRONTEND_PORT` | `8080`（Docker 前端默认） | 首页「系统信息」展示用；`npm run dev` 开发模式为 5173 |
+| `WEB_PORT` | `14320` | Docker 前端对外端口（docker-compose 的端口映射） |
+| `NOVNC_PORT` | `14321` | noVNC 对外端口 |
 
 > 实际请求一律走 `/api` 反代，`VITE_API_HOST`/`VITE_FRONTEND_PORT` 只是首页展示值。
 

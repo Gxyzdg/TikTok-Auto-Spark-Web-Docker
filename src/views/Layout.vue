@@ -47,7 +47,13 @@
       </el-menu>
 
       <div v-if="!isCollapsed || isMobile" class="sidebar-footer">
-        <a class="sidebar-footer__link" :href="vncUrl" target="_blank" rel="noopener">
+        <a
+          v-if="vncEnabled"
+          class="sidebar-footer__link"
+          :href="vncUrl"
+          target="_blank"
+          rel="noopener"
+        >
           <el-icon><Monitor /></el-icon>
           <span>noVNC 远程桌面</span>
         </a>
@@ -129,7 +135,7 @@ import { useUserStore } from '../stores/user'
 import { logout, getInitStatus, getLoginStatus, getUserInfo } from '../api/douyin'
 import { browserStatus, loginStatus, setBrowserStatus, setLoginStatus, douyinAvatar, setDouyinUser } from '../stores/browser'
 import FlameIcon from '../components/FlameIcon.vue'
-import { APP_VERSION } from '../config'
+import { APP_VERSION, NOVNC_URL, VNC_ENABLED } from '../config'
 import {
   Fold,
   Expand,
@@ -140,12 +146,14 @@ import {
   User,
   Clock,
   Setting,
+  Connection,
   Monitor,
   Moon,
   Sunny
 } from '@element-plus/icons-vue'
 
-const vncUrl = `http://${window.location.hostname}:6080/`
+const vncUrl = NOVNC_URL
+const vncEnabled = VNC_ENABLED
 
 const router = useRouter()
 const route = useRoute()
@@ -226,6 +234,7 @@ const menuList = [
   { path: '/home', title: '概览', sub: '运行状态与快捷操作', icon: House },
   { path: '/friends', title: '好友列表', sub: '好友数据与火花状态', icon: User },
   { path: '/tasks', title: '定时任务', sub: '每日自动发送任务', icon: Clock },
+  { path: '/wizard', title: '登录向导', sub: '扫码 / 手机验证码 / 二次验证一站式完成', icon: Connection },
   { path: '/settings', title: '设置', sub: '账号登录与系统配置', icon: Setting }
 ]
 

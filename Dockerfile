@@ -13,6 +13,9 @@
 
 # ---------- 阶段一：构建前端 ----------
 FROM node:22-alpine AS builder
+# 版本号可构建期注入：带 VNC 版本构建为 v1.5.0，无 VNC 版本构建为 v1.5.1
+ARG APP_VERSION=v1.5.0
+ENV VITE_APP_VERSION=${APP_VERSION}
 WORKDIR /build
 COPY package.json package-lock.json ./
 RUN npm install --no-audit --no-fund
@@ -35,26 +38,56 @@ ENV PYTHONUNBUFFERED=1 \
     CONFIG_FILE=/data/config.json \
     SHOW_BROWSER=1 \
     TZ=Asia/Shanghai \
-    SCALE_FACTOR=1
+    SCALE_FACTOR=1 \
+    VNC_ENABLED=1
+
+# 是否安装 VNC 组件：1 = 带 VNC（默认，:1.5.0）；0 = 无 VNC 精简版（:1.5.1）
+ARG INSTALL_VNC=1
+# 容器默认是否启用 VNC（可在 docker-compose 里用 VNC_ENABLED 覆盖）
+ARG VNC_ENABLED_DEFAULT=1
+ENV VNC_ENABLED=${VNC_ENABLED_DEFAULT}
 
 # Chromium + 驱动 + 中文字体（wqy-microhei，比 noto-cjk 小 ~86MB）
-# + Xvfb/VNC/noVNC + openbox 窗口管理器（让窗口可拖动）+ nginx + 工具
+# + Xvfb + openbox 窗口管理器（让窗口可拖动）+ nginx + 工具
+# VNC 组件（x11vnc/novnc/websockify）仅在 INSTALL_VNC=1 时安装
 # 同一层内完成清理，避免删除的内容残留在上层导致镜像膨胀
 RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y --no-install-recommends \
         chromium \
         chromium-driver \
         fonts-wqy-microhei \
         xvfb \
-        x11vnc \
-        novnc \
-        websockify \
         xdotool \
         openbox \
         nginx \
         curl \
+    && if [ "$INSTALL_VNC" = "1" ]; then \
+         apt-get install -y --no-install-recommends x11vnc novnc websockify ; \
+       fi \
     && rm -f /etc/nginx/sites-enabled/default \
     && rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* /var/cache/* \
     && rm -f /usr/bin/xdg-open /usr/bin/xdg-settings
+
+# 抑制"外部协议"模态弹窗（抖音页面会尝试 snssdk1128:// / douyin:// 等自定义协议拉起 App，
+# Chromium 会弹"是否允许打开 xdg-open"的**模态框**，该弹窗会阻断页面输入 → 远程操作失效）。
+# AutoLaunchProtocolsFromOrigins：匹配的来源+协议直接静默处理，不再弹框；
+# 同时 xdg-open 已删除，即使触发也不会有任何动作。
+RUN mkdir -p /etc/chromium/policies/managed && cat > /etc/chromium/policies/managed/spark-external-protocol.json <<'EOF'
+{
+  "AutoLaunchProtocolsFromOrigins": [
+    { "protocol": "snssdk1128", "allowed_origins": ["*"] },
+    { "protocol": "snssdk1233", "allowed_origins": ["*"] },
+    { "protocol": "douyin", "allowed_origins": ["*"] },
+    { "protocol": "aweme", "allowed_origins": ["*"] },
+    { "protocol": "webcast", "allowed_origins": ["*"] },
+    { "protocol": "sslocal", "allowed_origins": ["*"] },
+    { "protocol": "bytedance", "allowed_origins": ["*"] },
+    { "protocol": "toutiao", "allowed_origins": ["*"] },
+    { "protocol": "ixigua", "allowed_origins": ["*"] },
+    { "protocol": "newsarticle", "allowed_origins": ["*"] }
+  ],
+  "ExternalProtocolDialogShowAlwaysOpenCheckbox": false
+}
+EOF
 
 # 后端依赖
 WORKDIR /app

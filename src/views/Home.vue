@@ -162,7 +162,7 @@
               <span class="info-label">项目已运行</span>
               <span class="info-value uptime">{{ uptime }}</span>
             </div>
-            <div class="info-item">
+            <div v-if="API_HOST" class="info-item">
               <span class="info-label">API 地址</span>
               <span class="info-value">{{ API_HOST }}</span>
             </div>
@@ -174,7 +174,7 @@
               <span class="info-label">VNC 端口</span>
               <span class="info-value">
                 <a :href="vncUrl" target="_blank" class="vnc-link">
-                  进入 noVNC (6080) <el-icon><TopRight /></el-icon>
+                  进入 noVNC ({{ NOVNC_PORT }}) <el-icon><TopRight /></el-icon>
                 </a>
               </span>
             </div>
@@ -261,7 +261,7 @@ import { initBrowser as initBrowserApi, reInitBrowser as reInitBrowserApi, getFr
 import { browserStatus, loginStatus, friendsList, douyinAvatar, douyinNickname, setBrowserStatus, setLoginStatus, setFriendsList, setDouyinUser } from '../stores/browser'
 import FlameIcon from '../components/FlameIcon.vue'
 import { formatFriendsList } from '../utils/format'
-import { APP_VERSION, API_HOST, FRONTEND_PORT } from '../config'
+import { APP_VERSION, API_HOST, FRONTEND_PORT, NOVNC_PORT, NOVNC_URL } from '../config'
 
 const router = useRouter()
 
@@ -302,8 +302,8 @@ const avatarMap = computed(() => {
 })
 const avatarOf = (name) => avatarMap.value[name] || ''
 
-// noVNC 网页版地址（用当前访问的域名/IP 拼 6080 端口，便于一键打开 VNC 二次验证）
-const vncUrl = `http://${window.location.hostname}:6080/`
+// noVNC 网页版地址（端口跟随容器 NOVNC_PORT 环境变量，不再写死）
+const vncUrl = NOVNC_URL
 
 // 数字滚动动画（好友数/任务数变化时平滑递增）
 const friendsDisplay = ref(0)

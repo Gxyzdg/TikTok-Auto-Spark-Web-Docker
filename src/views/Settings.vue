@@ -160,7 +160,7 @@
     <!-- 检测登录状态 · 二次确认弹窗（提示先完成 VNC 二次验证） -->
     <el-dialog v-model="checkConfirmVisible" title="检测登录状态" width="420px" destroy-on-close>
       <div class="check-tip">
-        <p>请先在 <b>VNC（noVNC）</b> 里完成抖音二次验证（如滑块、确认登录），再点击下方「确认检测」获取登录状态。</p>
+        <p>请先在 <b>VNC（noVNC）</b> 或 <b>登录向导</b> 里完成抖音二次验证（接收手机验证码 / 扫码人脸识别），再点击下方「确认检测」获取登录状态。</p>
         <p class="check-tip-sub">
           VNC 地址：
           <a :href="vncUrl" target="_blank" rel="noopener" class="vnc-dialog-link">{{ vncUrl }}</a>
@@ -204,6 +204,7 @@ import { ref, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Key, Refresh, View, Loading, Edit, Lock, Document, SwitchButton, Picture, Message, WarnTriangleFilled, Star, TopRight } from '@element-plus/icons-vue'
 import { getLoginStatus, initBrowser, getLoginPng, login, getUsername, changePassword, getLastLoginIP, getFriendsList, getCooker, pnglogin, getScrlk, dieLogin, sendVerifyCode, submitVerifyCode, forceLogin, getSaveSession, setSaveSession } from '../api/douyin'
+import { NOVNC_URL } from '../config'
 import { loginStatus, setLoginStatus, setFriendsList } from '../stores/browser'
 import { formatFriendsList } from '../utils/format'
 
@@ -219,7 +220,7 @@ const checkConfirmVisible = ref(false)
 // 保存登录数据（Cookie）开关
 const saveSession = ref(false)
 const saveSessionLoading = ref(false)
-const vncUrl = `http://${window.location.hostname}:6080/`
+const vncUrl = NOVNC_URL
 const manualDialogVisible = ref(false)
 const manualLoading = ref(false)
 const manualForm = ref({

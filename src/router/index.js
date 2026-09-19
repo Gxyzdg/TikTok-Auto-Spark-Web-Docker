@@ -34,6 +34,12 @@ const routes = [
         meta: { title: '定时任务', icon: 'Clock' }
       },
       {
+        path: 'wizard',
+        name: 'Wizard',
+        component: () => import('../views/Wizard.vue'),
+        meta: { title: '登录向导', icon: 'Connection' }
+      },
+      {
         path: 'settings',
         name: 'Settings',
         component: () => import('../views/Settings.vue'),

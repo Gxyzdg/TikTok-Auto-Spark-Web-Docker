@@ -153,6 +153,12 @@ export const setSaveSession = (enabled) => api.post('/Api/SetSaveSession', { ena
 // 综合运行状态（浏览器/登录/调度器/任务数）
 export const getStatus = () => api.get('/Api/GetStatus')
 
+// 远程画面：可用性与视口信息（登录向导用）
+export const getScreenInfo = () => api.get('/Api/Screen/Info')
+
+// 远程画面：签发一次性 WebSocket 连接票据
+export const getScreenTicket = () => api.get('/Api/Screen/Ticket')
+
 // 获取用户名
 export const getUsername = () => api.get('/Api/GetUsername')
 
