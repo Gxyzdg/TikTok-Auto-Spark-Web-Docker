@@ -255,6 +255,102 @@ class Douyin:
             self._friends_cache_time = time.time()
             return temp_list
 
+    # ---------- 发送消息用的辅助判断（都是页面级轻量查询） ----------
+    def _current_chat_title(self):
+        """右侧当前打开会话的好友名；没有打开任何会话时返回空串。
+
+        注意：该标题元素的文本常带火花状态（如 "余佳扬\n重燃中 1/3"），只取第一行做比对。
+        """
+        try:
+            el = driver.find_element(By.XPATH, '//*[contains(@class,"RightPanelHeadertitle")]')
+            text = (el.text or '').strip()
+            return text.splitlines()[0].strip() if text else ''
+        except Exception:
+            return ''
+
+    def _my_message_count(self):
+        """当前会话里"我发出的消息"条数（用于判断是否真的发出了新消息）。"""
+        try:
+            return len(driver.find_elements(By.XPATH, '//*[contains(@class,"messageMessageBoxisFromMe")]'))
+        except Exception:
+            return 0
+
+    def _wait_message_sent(self, before_count, text, timeout=5.0):
+        """轮询确认消息已出现在会话中：自己的消息条数增加，或最后一条自己发的消息内容匹配。
+
+        历史问题：老实现发完回车就直接返回成功，页面还没真正发出（例如聊天区为空、输入框
+        尚未就绪）也会被判成功，于是出现"提示成功但对方没收到"。
+        """
+        deadline = time.time() + timeout
+        target = (text or '').strip()
+        while time.time() < deadline:
+            time.sleep(0.4)
+            if self._my_message_count() > before_count:
+                return True
+            if target:
+                try:
+                    bubbles = driver.find_elements(By.XPATH, '//*[contains(@class,"messageMessageBoxisFromMe")]')
+                    if bubbles and (bubbles[-1].text or '').strip() == target:
+                        return True
+                except Exception:
+                    pass
+        return False
+
+    def _find_friend_element(self, name):
+        """按名字在会话列表里实时查找好友行（列表虚拟化 + 按最近消息动态排序，不能用旧序号 xpath）。
+
+        返回可点击的元素；找不到返回 None。
+        """
+        if not name or '"' in name:
+            return None
+        wrapper_xpath = '//div[@class="conversationConversationListwrapper"]'
+        title_xpath = ('.//*[contains(@class,"conversationConversationItemtitle")'
+                       ' and normalize-space(text())="%s"]' % name)
+        try:
+            wrapper = driver.find_element(By.XPATH, wrapper_xpath)
+        except Exception:
+            return None
+        try:
+            return wrapper.find_element(By.XPATH, title_xpath)
+        except Exception:
+            pass
+        # 没在当前视口内：滚到顶部后逐屏滚动查找（最多 12 屏）
+        try:
+            driver.execute_script("arguments[0].scrollTop = 0;", wrapper)
+            time.sleep(0.3)
+            for _ in range(12):
+                try:
+                    return wrapper.find_element(By.XPATH, title_xpath)
+                except Exception:
+                    pass
+                moved = driver.execute_script(
+                    "const w = arguments[0]; const before = w.scrollTop;"
+                    "w.scrollTop = before + w.clientHeight - 40;"
+                    "return w.scrollTop !== before;", wrapper)
+                if not moved:
+                    break
+                time.sleep(0.4)
+        except Exception:
+            pass
+        return None
+
+    def _click_friend(self, name):
+        """点击目标好友的会话行；点击前按名字定位，避免列表重排后点到别人。"""
+        el = self._find_friend_element(name)
+        if el is None:
+            return False, '会话列表里没有找到该好友'
+        try:
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+            time.sleep(0.3)
+        except Exception:
+            pass
+        try:
+            row = el.find_element(By.XPATH, 'ancestor::*[contains(@class,"conversationConversationItem")][1]')
+            row.click()
+        except Exception:
+            el.click()
+        return True, ''
+
     def Send_Frinder(self, name: str, text: str):
         with driver_lock:
             try:
@@ -264,21 +360,44 @@ class Douyin:
             if count == 0:
                 print("⚠️ 更新好友列表失败!")
                 return TrueString(False, '未获取到好友列表')
-            try:
-                for index, value in self.friends_xpath_list.items():
-                    if index == name:
-                        friend_id = driver.find_element(By.XPATH, value=value)
-                        friend_id.click()
-                        time.sleep(1.5)
-                        seng = driver.find_element(By.XPATH,
-                                                   value='//div[@class="messageEditorimChatEditorContainer"]/div/div')
-                        seng.send_keys(text)
-                        seng.send_keys(Keys.ENTER)
+
+            last_error = ''
+            # 最多尝试两次：首次失败（常见于聊天区为空 / 会话未切换成功）自动重试一次
+            for attempt in (1, 2):
+                try:
+                    ok, err = self._click_friend(name)
+                    if not ok:
+                        last_error = err
+                        continue
+
+                    # ① 确认右侧真的切到了这位好友，否则会把消息发给别人
+                    opened = ''
+                    for _ in range(12):
+                        time.sleep(0.4)
+                        opened = self._current_chat_title()
+                        if opened == name or (opened and name in opened):
+                            break
+                    if not (opened == name or (opened and name in opened)):
+                        last_error = f'会话未切换成功（当前打开：{opened or "无"}）'
+                        continue
+
+                    # ② 输入并发送（先聚焦输入框，避免聊天区为空时输入落空）
+                    before = self._my_message_count()
+                    seng = driver.find_element(
+                        By.XPATH, value='//div[@class="messageEditorimChatEditorContainer"]/div/div')
+                    seng.click()
+                    time.sleep(0.2)
+                    seng.send_keys(text)
+                    time.sleep(0.2)
+                    seng.send_keys(Keys.ENTER)
+
+                    # ③ 校验消息确实出现在会话里，否则视为失败（不再误报成功）
+                    if self._wait_message_sent(before, text, timeout=5.0):
                         return TrueString(True, None)
-            except Exception as e:
-                return TrueString(False, e)
-            # 好友列表非空但循环未匹配到该好友
-            return TrueString(False, '未找到该好友')
+                    last_error = '消息未出现在会话中（发送未生效）'
+                except Exception as e:
+                    last_error = str(e)
+            return TrueString(False, last_error or '发送失败')
 
     def Find_Friends(self, name: str):
         with driver_lock:
