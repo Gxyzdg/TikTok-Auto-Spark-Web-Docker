@@ -405,59 +405,51 @@ class Douyin:
                 return True   # 空文本消息只能靠条数判断
         return False
 
-    def _find_friend_element(self, name):
-        """按名字在会话列表里实时查找好友行（列表虚拟化 + 按最近消息动态排序，不能用旧序号 xpath）。
-
-        返回可点击的元素；找不到返回 None。
-        """
-        if not name or '"' in name:
-            return None
-        wrapper_xpath = '//div[@class="conversationConversationListwrapper"]'
-        title_xpath = ('.//*[contains(@class,"conversationConversationItemtitle")'
-                       ' and normalize-space(text())="%s"]' % name)
-        try:
-            wrapper = driver.find_element(By.XPATH, wrapper_xpath)
-        except Exception:
-            return None
-        try:
-            return wrapper.find_element(By.XPATH, title_xpath)
-        except Exception:
-            pass
-        # 没在当前视口内：滚到顶部后逐屏滚动查找（最多 12 屏）
-        try:
-            driver.execute_script("arguments[0].scrollTop = 0;", wrapper)
-            time.sleep(0.3)
-            for _ in range(12):
-                try:
-                    return wrapper.find_element(By.XPATH, title_xpath)
-                except Exception:
-                    pass
-                moved = driver.execute_script(
-                    "const w = arguments[0]; const before = w.scrollTop;"
-                    "w.scrollTop = before + w.clientHeight - 40;"
-                    "return w.scrollTop !== before;", wrapper)
-                if not moved:
-                    break
-                time.sleep(0.4)
-        except Exception:
-            pass
-        return None
+    _CLICK_FRIEND_JS = """
+        const w = arguments[0], want = arguments[1];
+        const norm = (v) => (v || '').replace(/\\s+/g, '');
+        const find = () => [...w.querySelectorAll('%(title)s')]
+            .filter(e => !/Wrapper/.test(e.className))
+            .find(e => norm((e.innerText || '').split('\\n')[0]) === norm(want));
+        let hit = find();
+        // 虚拟列表：边滚边找（滚动 wrapper 及其所有可滚动后代，而不是只滚 wrapper 自身）
+        for (let round = 0; !hit && round < 12; round++) {
+          let moved = false;
+          const all = [w].concat([...w.querySelectorAll('*')]);
+          for (const e of all) {
+            if (e.scrollHeight > e.clientHeight + 2) {
+              const before = e.scrollTop;
+              e.scrollTop = before + e.clientHeight - 40;
+              if (e.scrollTop !== before) moved = true;
+            }
+          }
+          if (!moved) break;
+          hit = find();
+        }
+        if (!hit) return 'notfound';
+        const row = hit.closest('[class*="conversationConversationItem"]') || hit;
+        row.scrollIntoView({block: 'center'});
+        row.click();
+        return 'ok';
+    """ % {'title': _FRIEND_TITLE_SEL}
 
     def _click_friend(self, name):
-        """点击目标好友的会话行；点击前按名字定位，避免列表重排后点到别人。"""
-        el = self._find_friend_element(name)
-        if el is None:
+        """按名字查找并点击会话行。
+
+        整个查找+滚动+点击都在页面里一次完成：避免"元素过期"、避免 xpath 字面量
+        （名字含双引号会构造失败）、也避免只滚动 wrapper 自身导致非首屏好友永远找不到。
+        返回 (是否成功, 错误信息)。
+        """
+        try:
+            wrapper = driver.find_element(By.XPATH, '//div[@class="conversationConversationListwrapper"]')
+        except Exception:
+            return False, '聊天页未就绪（找不到会话列表）'
+        try:
+            result = driver.execute_script(self._CLICK_FRIEND_JS, wrapper, name)
+        except Exception as e:
+            return False, f'点击好友失败：{str(e)[:80]}'
+        if result == 'notfound':
             return False, '会话列表里没有找到该好友'
-        try:
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
-            time.sleep(0.3)
-        except Exception:
-            pass
-        try:
-            row = el.find_element(By.XPATH, 'ancestor::*[contains(@class,"conversationConversationItem")][1]')
-            row.click()
-        except Exception:
-            el.click()
         return True, ''
 
     def Send_Frinder(self, name: str, text: str):
@@ -538,10 +530,18 @@ class Douyin:
 
 init = False
 Login_is_bool = False
+# 显式初始化：这些全局在浏览器创建前必须存在，否则 _driver_alive() 里 `if not driver` 会抛 NameError
+# （历史故障：容器重启后前端一调 /Api/GetLogin 就 500，日志刷 traceback）
+driver = None
+douyin = None
+options = None
 driver_lock = threading.RLock()  # 串行化 driver 操作，避免调度线程与请求线程并发冲突
 init_lock = threading.RLock()    # 保护 Init 的 check-then-act，避免并发请求初始化出多个 driver
 tasks_lock = threading.RLock()   # 保护 scheduled_tasks / paused_tasks 的并发读写
 tokens_lock = threading.Lock()   # 保护 _valid_tokens 的并发访问
+config_lock = threading.RLock()  # 保护 _config 的并发读写
+_tasks_load_failed = False       # 任务文件读取失败标志：为真时禁止写回，避免用空数据覆盖掉原文件
+_config_load_failed = False      # 配置文件读取失败标志：为真时禁止写回
 # 默认关闭 Swagger/OpenAPI（它们经 nginx 是匿名可达的，会泄露全部接口清单）；
 # 需要调试时用环境变量 ENABLE_DOCS=1 打开。
 _DOCS_ENABLED = os.environ.get('ENABLE_DOCS', '0').strip().lower() in ('1', 'true', 'yes', 'on')
@@ -803,6 +803,7 @@ def _save_tasks():
 
 def _load_tasks():
     """启动时从 JSON 文件恢复任务：已停用任务直接恢复，定时任务等待浏览器初始化后再注册"""
+    global _tasks_load_failed
     if not os.path.exists(TASKS_FILE):
         return
     try:
@@ -932,9 +933,10 @@ def Home(authorization: str = Header(None)):
 # 登录态探测用的页面标志 / Cookie（扫码登录成功后只能靠这些判断，不能只信内存标志位）
 _LOGIN_PANEL_XPATH = '//*[@id="douyin_login_comp_flat_panel"]/picture'
 _LOGIN_OK_XPATHS = (
-    '//div[@class="conversationConversationListwrapper"]',  # 聊天页会话列表（登录后才加载）
-    '//*[@id="douyin-header"]//img',                        # 顶部自己的头像
-    '//*[@id="douyin_right_header"]//img',
+    # 只保留"登录后才会出现"的正向标志。早期版本把站点通用头部 img 也算作登录标志，
+    # 未登录/风控页同样能匹配到 → 会被误判为已登录。
+    '//div[@class="conversationConversationListwrapper"]',
+    '//*[contains(@class,"conversationConversationItem")]',
 )
 _LOGIN_COOKIE_KEYS = ('sessionid', 'sessionid_ss', 'sid_tt')
 
@@ -981,12 +983,18 @@ def _detect_login_state():
         except Exception:
             break
 
+    # 兜底：必须"有登录态 Cookie + 当前在 /chat 页 + 会话列表已渲染"三者同时成立。
+    # 仅凭 Cookie 不够：服务端会话失效后 Cookie 仍会留在浏览器里，会误判为已登录。
     try:
         url = (driver.current_url or '')
     except Exception:
         url = ''
-    if has_session and 'login' not in url and 'passport' not in url:
-        return True
+    if has_session and '/chat' in url:
+        try:
+            driver.find_element(By.XPATH, '//div[@class="conversationConversationListwrapper"]')
+            return True
+        except Exception:
+            return False
     return False
 
 
@@ -1661,6 +1669,11 @@ def remote_control_active():
 
 def _vnc_enabled():
     return os.environ.get('VNC_ENABLED', '1').strip().lower() not in ('0', 'false', 'no', 'off')
+
+
+def _norm_name(value):
+    """归一化好友名（去掉所有空白/换行）用于严格比对，避免子串误判。"""
+    return re.sub(r'\s+', '', str(value or ''))
 
 
 def _dismiss_browser_dialogs(reason=''):
