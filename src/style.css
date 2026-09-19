@@ -227,6 +227,15 @@ a {
 
 .el-dialog {
   border-radius: var(--radius-lg) !important;
+  /* 兜底：Element Plus 的 el-dialog 只设 width、没有 max-width，
+     手机上 500~640px 的弹窗会超出屏幕、按钮被裁到屏外 */
+  max-width: calc(100vw - 24px);
+}
+
+@media (max-width: 768px) {
+  .el-dialog {
+    --el-dialog-width: calc(100vw - 24px) !important;
+  }
 }
 
 .el-dialog__header {

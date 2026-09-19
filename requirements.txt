@@ -1,6 +1,9 @@
 # 抖音火花助手后端依赖
-fastapi
-uvicorn[standard]
-selenium
-schedule
-requests
+#
+# 说明：这里**固定版本**，保证数月后重新构建镜像时行为一致（"能用久一点"）。
+# 如需升级，请改版本号后重新构建并回归测试。
+fastapi==0.141.1
+uvicorn[standard]==0.53.0
+selenium==4.49.0
+schedule==1.2.2
+requests==2.34.2

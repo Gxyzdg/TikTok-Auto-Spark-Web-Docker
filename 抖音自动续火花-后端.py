@@ -43,6 +43,16 @@ def _build_user_agent() -> str:
     return f"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_ver} Safari/537.36"
 
 
+def _chromium_using_profile(profile_dir: str) -> bool:
+    """是否有 Chromium 进程正在使用指定资料目录。"""
+    try:
+        out = subprocess.run(['pgrep', '-f', f'--user-data-dir={profile_dir}'],
+                             capture_output=True, text=True, timeout=5)
+        return bool((out.stdout or '').strip())
+    except Exception:
+        return False
+
+
 def _clear_profile_locks(profile_dir: str):
     """清理 Chromium 单例锁残留（Singleton*）。
 
@@ -101,12 +111,19 @@ def unban_config():
     opts.add_argument('--disable-component-update')
     opts.add_argument('--disable-default-apps')
     opts.add_argument('--no-pings')
+    # 长期运行：限制磁盘缓存，避免数据卷里的资料目录无限增长（写满磁盘会导致容器起不来）
+    opts.add_argument('--disk-cache-size=67108864')  # 64MB
     # 保存登录数据（Cookie）：开启时使用持久化 user-data-dir，浏览器重启后仍保持抖音登录
     if _config.get('save_session'):
         try:
             profile_dir = os.path.join(os.path.dirname(os.path.abspath(CONFIG_FILE)), 'chrome-profile')
             os.makedirs(profile_dir, exist_ok=True)
-            _clear_profile_locks(profile_dir)
+            # 只有当没有 Chromium 正在使用该资料目录时才清锁：
+            # 若旧实例还活着就删锁，会让两个 Chromium 共用同一 profile → 资料损坏、登录态丢失
+            if _chromium_using_profile(profile_dir):
+                log('⚠️ 检测到仍有 Chromium 在使用登录资料目录，跳过锁清理（避免损坏资料）')
+            else:
+                _clear_profile_locks(profile_dir)
             opts.add_argument(f'--user-data-dir={profile_dir}')
             log(f'💾 已启用登录数据保存，浏览器资料目录：{profile_dir}')
         except Exception as e:
@@ -193,65 +210,131 @@ class Douyin:
         self.friends_xpath_list = {}
         self._friends_cache_time = 0.0
 
+    # 会话列表里"名字/头像/火花"的稳定选择器（对应抖音聊天页 DOM）
+    _FRIEND_TITLE_SEL = '[class*="conversationConversationItemtitle"]'
+    _FRIEND_AVATAR_SEL = 'img[src*="douyinpic.com"]'
+    _FRIEND_STREAK_SEL = '[class*="commonStreaknormalText"]'
+
+    # 一次 JS 调用把整屏会话解析成 [{name, avatar, fire}]：
+    # 以"名字元素"为锚点就地向上找整行，再在行内取头像/火花，避免用序号拼 xpath
+    # （列表虚拟滚动且按最近消息动态排序，序号会串到别人）。
+    _EXTRACT_FRIENDS_JS = """
+        const w = arguments[0];
+        const titles = [...w.querySelectorAll('%(title)s')].filter(e => !/Wrapper/.test(e.className));
+        const rows = [];
+        for (const t of titles) {
+          const name = (t.innerText || '').trim().split('\n')[0].trim();
+          if (!name) continue;
+          // 以名字元素为锚点向上找"整行"：最多爬 4 层，且该祖先内必须只有一个名字元素
+          // （否则说明已经爬到列表容器，会取到别人的头像/火花 → 宁可留空也不能取错人）
+          let row = null;
+          let node = t;
+          for (let i = 0; i < 4 && node.parentElement; i++) {
+            node = node.parentElement;
+            const cnt = [...node.querySelectorAll('%(title)s')].filter(e => !/Wrapper/.test(e.className)).length;
+            if (cnt === 1 && node.querySelector('%(avatar)s')) { row = node; break; }
+          }
+          const img = row ? row.querySelector('%(avatar)s') : null;
+          const st = row ? row.querySelector('%(streak)s') : null;
+          rows.push({
+            name: name,
+            avatar: img ? (img.getAttribute('src') || '') : '',
+            fire: st ? (st.innerText || '').trim() : ''
+          });
+        }
+        return JSON.stringify(rows);
+    """ % {'title': _FRIEND_TITLE_SEL, 'avatar': _FRIEND_AVATAR_SEL, 'streak': _FRIEND_STREAK_SEL}
+
     def Updara_FrinderList(self):
+        """读取会话列表里的全部好友（名字 / 头像 / 火花天数）。
+
+        三个关键点：
+          1. 会话列表是**虚拟滚动**的：必须边滚边抓，并且**跨轮累积**结果
+             （只保留最后一轮的话，拿到的是列表末端那一屏，前面的好友会全部丢失）；
+          2. 列表按最近消息**动态排序**：按"名字元素"锚点就地取头像/火花，不用序号 xpath；
+          3. 失败与"确实没有好友"要能区分：页面未就绪/脚本异常返回 None，真的为空返回 []。
+        """
         with driver_lock:
             wrapper_xpath = '//div[@class="conversationConversationListwrapper"]'
-            friends_xpath = wrapper_xpath + '/div/div/div'
-            # 会话列表是虚拟滚动的：窗口较小时只渲染可视区的好友。
-            # 循环滚动列表到底部触发懒加载，确保抓取全部好友（数量统计/定时任务依赖完整列表）。
-            try:
-                wrapper_el = driver.find_element(By.XPATH, wrapper_xpath)
-            except Exception:
-                wrapper_el = None
-            prev_count = -1
-            for _ in range(60):
-                items = driver.find_elements(By.XPATH, friends_xpath)
-                if wrapper_el is not None:
-                    try:
-                        # 滚动 wrapper 内所有可滚动容器到底部，触发虚拟列表懒加载更多会话
-                        driver.execute_script(
-                            'var roots=[arguments[0]].concat(Array.prototype.slice.call(arguments[0].querySelectorAll("*")));'
-                            'for(var i=0;i<roots.length;i++){var e=roots[i];'
-                            'if(e.scrollHeight>e.clientHeight+2){e.scrollTop=e.scrollHeight;}}',
-                            wrapper_el,
-                        )
-                    except Exception:
-                        pass
-                time.sleep(0.4)
-                items2 = driver.find_elements(By.XPATH, friends_xpath)
-                if len(items2) == len(items) and len(items) == prev_count:
-                    break
-                prev_count = len(items)
-            msg_main_list = driver.find_elements(By.XPATH, friends_xpath)
-            temp_list = []
-            for msg_len in range(1, len(msg_main_list) + 1):
-                # 单个条目解析失败仅跳过该条，不影响整体列表（DOM 结构微变/缺字段时更稳）
+            wrapper_el = None
+            for attempt in range(3):
                 try:
-                    new_xpath = f'//div[@class="conversationConversationListwrapper"]/div/div[{msg_len + 1}]/div[1]/div[2]/div[1]/div[1]'
-                    avatar_xpath = f'//div[@class="conversationConversationListwrapper"]/div/div[{msg_len + 1}]/div[1]/div[1]/div/span/img'
-                    avatar_xpath2 = f'//div[@class="conversationConversationListwrapper"]/div/div[{msg_len + 1}]/div/div/img'
-                    fire_xpath = f'//div[@class="conversationConversationListwrapper"]/div/div[{msg_len + 1}]/div[1]/div[2]/div[1]/div[2]/div[1]/div/div'
-                    friends_get = driver.find_element(By.XPATH, value=new_xpath)
-                    friends_text = friends_get.text
-                    if not friends_text:
-                        continue  # 空名字条目跳过
-                    try:
-                        avatar_get = driver.find_element(By.XPATH, value=avatar_xpath)
-                        avatar = avatar_get.get_attribute('src')
-                    except:
-                        try:
-                            avatar_get = driver.find_element(By.XPATH, value=avatar_xpath2)
-                            avatar = avatar_get.get_attribute('src')
-                        except:
-                            avatar = ''
-                    self.friends_xpath_list[friends_text] = new_xpath
-                    try:
-                        fire_count = driver.find_element(By.XPATH, value=fire_xpath).text.strip()
-                    except:
-                        fire_count = ''
-                    temp_list.append(UserFriendsInfo(friends_text, avatar, fire_count))
+                    wrapper_el = driver.find_element(By.XPATH, wrapper_xpath)
+                    break
                 except Exception:
+                    if attempt == 0:
+                        time.sleep(1.5)          # 首次可能只是页面还在加载
+                    else:
+                        try:
+                            _recover_douyin_page('读取好友列表时页面未就绪')
+                        except Exception:
+                            pass
+                        time.sleep(1.5)
+            if wrapper_el is None:
+                log('⚠️ 读取好友列表失败：聊天页未就绪（已尝试等待并恢复页面）')
+                return None
+
+            scroll_js = (
+                'const w = arguments[0]; let moved = false;'
+                'const all = [w].concat([...w.querySelectorAll("*")]);'
+                'for (const e of all) {'
+                '  if (e.scrollHeight > e.clientHeight + 2) {'
+                '    const before = e.scrollTop; e.scrollTop = e.scrollHeight;'
+                '    if (e.scrollTop !== before) moved = true;'
+                '  }'
+                '}'
+                'return moved;'
+            )
+
+            def grab():
+                try:
+                    return json.loads(driver.execute_script(self._EXTRACT_FRIENDS_JS, wrapper_el) or '[]')
+                except Exception as e:
+                    log(f'⚠️ 解析会话列表失败：{e}')
+                    return None
+
+            merged = {}
+            script_fail = 0
+            for _ in range(40):
+                batch = grab()
+                if batch is None:
+                    script_fail += 1
+                    if script_fail >= 3:
+                        break
+                    time.sleep(0.5)
                     continue
+                script_fail = 0
+                for item in batch:
+                    name = (item.get('name') or '').strip()
+                    if name and name not in merged:
+                        merged[name] = item
+                try:
+                    moved = driver.execute_script(scroll_js, wrapper_el)
+                except Exception:
+                    moved = False
+                if not moved:
+                    # 滚不动了：再抓一轮（可能刚好有新加载的项）后结束
+                    time.sleep(0.6)
+                    tail = grab()
+                    if tail:
+                        for item in tail:
+                            name = (item.get('name') or '').strip()
+                            if name and name not in merged:
+                                merged[name] = item
+                    break
+                time.sleep(0.4)
+
+            if not merged:
+                if script_fail:
+                    log('⚠️ 读取好友列表失败：解析会话列表连续异常（页面结构可能已变化）')
+                    return None
+                log('ℹ️ 会话列表为空（该账号当前没有会话）')
+                return []
+
+            temp_list = []
+            self.friends_xpath_list.clear()
+            for name, item in merged.items():
+                temp_list.append(UserFriendsInfo(name, item.get('avatar') or '', item.get('fire') or ''))
             self._friends_cache_time = time.time()
             return temp_list
 
@@ -269,31 +352,57 @@ class Douyin:
             return ''
 
     def _my_message_count(self):
-        """当前会话里"我发出的消息"条数（用于判断是否真的发出了新消息）。"""
+        """当前会话里"我发出的消息"条数；查询失败返回 None（不能当成 0，否则会把"历史加载"误判为新消息）。"""
         try:
             return len(driver.find_elements(By.XPATH, '//*[contains(@class,"messageMessageBoxisFromMe")]'))
         except Exception:
-            return 0
+            return None
 
-    def _wait_message_sent(self, before_count, text, timeout=5.0):
-        """轮询确认消息已出现在会话中：自己的消息条数增加，或最后一条自己发的消息内容匹配。
+    def _last_my_bubble_text(self):
+        """最后一条"我发出的消息"的文本（用来确认本条消息真的进了会话）。"""
+        try:
+            els = driver.find_elements(By.XPATH, '//*[contains(@class,"messageMessageBoxisFromMe")]')
+            for el in reversed(els):
+                txt = (el.text or '').strip()
+                if txt:
+                    return txt
+        except Exception:
+            pass
+        return ''
 
-        历史问题：老实现发完回车就直接返回成功，页面还没真正发出（例如聊天区为空、输入框
-        尚未就绪）也会被判成功，于是出现"提示成功但对方没收到"。
-        """
+    def _wait_message_list_stable(self, timeout=6.0):
+        """等消息区加载稳定（连续两次采样条数一致），避免把"历史消息异步渲染"当成新消息。"""
         deadline = time.time() + timeout
-        target = (text or '').strip()
+        prev = self._my_message_count()
+        same = 0
         while time.time() < deadline:
             time.sleep(0.4)
-            if self._my_message_count() > before_count:
+            cur = self._my_message_count()
+            if cur is not None and cur == prev:
+                same += 1
+                if same >= 2:
+                    return cur
+            else:
+                same = 0
+            prev = cur
+        return prev
+
+    def _wait_message_sent(self, before_count, text, timeout=6.0):
+        """确认消息真的进了会话：以"最后一条自己的消息内容 == 本条内容"为主，数量增加为辅。
+
+        历史问题：老实现发完回车直接返回成功；后来改成"条数增加即成功"也不够严谨——
+        新会话的历史消息是异步渲染的，回车后即使没发出去，历史气泡也会让条数从 0 涨上去。
+        因此这里先用 _wait_message_list_stable 拿到稳定基线，再以文本匹配为准。
+        """
+        target = (text or '').strip()
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            time.sleep(0.4)
+            if target and self._last_my_bubble_text() == target:
                 return True
-            if target:
-                try:
-                    bubbles = driver.find_elements(By.XPATH, '//*[contains(@class,"messageMessageBoxisFromMe")]')
-                    if bubbles and (bubbles[-1].text or '').strip() == target:
-                        return True
-                except Exception:
-                    pass
+            cur = self._my_message_count()
+            if target == '' and cur is not None and before_count is not None and cur > before_count:
+                return True   # 空文本消息只能靠条数判断
         return False
 
     def _find_friend_element(self, name):
@@ -357,9 +466,9 @@ class Douyin:
                 count = self.Updara_FrinderList()
             except Exception as e:
                 return TrueString(False, e)
-            if count == 0:
+            if not count:
                 print("⚠️ 更新好友列表失败!")
-                return TrueString(False, '未获取到好友列表')
+                return TrueString(False, '未获取到好友列表（页面未就绪或未登录）')
 
             last_error = ''
             # 最多尝试两次：首次失败（常见于聊天区为空 / 会话未切换成功）自动重试一次
@@ -375,14 +484,19 @@ class Douyin:
                     for _ in range(12):
                         time.sleep(0.4)
                         opened = self._current_chat_title()
-                        if opened == name or (opened and name in opened):
+                        # 严格相等（去空白）：绝不能用子串包含判断，
+                        # 否则"A 是 B 名字子串"时会往别人的会话里发消息还报成功
+                        if _norm_name(opened) == _norm_name(name):
                             break
-                    if not (opened == name or (opened and name in opened)):
+                    if _norm_name(opened) != _norm_name(name):
                         last_error = f'会话未切换成功（当前打开：{opened or "无"}）'
                         continue
 
                     # ② 输入并发送（先聚焦输入框，避免聊天区为空时输入落空）
-                    before = self._my_message_count()
+                    # 先等消息区加载稳定再取基线（否则会把"历史消息加载"误判成本次发送成功）
+                    before = self._wait_message_list_stable()
+                    if before is None:
+                        before = self._my_message_count()
                     seng = driver.find_element(
                         By.XPATH, value='//div[@class="messageEditorimChatEditorContainer"]/div/div')
                     seng.click()
@@ -428,7 +542,14 @@ driver_lock = threading.RLock()  # 串行化 driver 操作，避免调度线程�
 init_lock = threading.RLock()    # 保护 Init 的 check-then-act，避免并发请求初始化出多个 driver
 tasks_lock = threading.RLock()   # 保护 scheduled_tasks / paused_tasks 的并发读写
 tokens_lock = threading.Lock()   # 保护 _valid_tokens 的并发访问
-app = FastAPI()
+# 默认关闭 Swagger/OpenAPI（它们经 nginx 是匿名可达的，会泄露全部接口清单）；
+# 需要调试时用环境变量 ENABLE_DOCS=1 打开。
+_DOCS_ENABLED = os.environ.get('ENABLE_DOCS', '0').strip().lower() in ('1', 'true', 'yes', 'on')
+app = FastAPI(
+    docs_url='/docs' if _DOCS_ENABLED else None,
+    redoc_url='/redoc' if _DOCS_ENABLED else None,
+    openapi_url='/openapi.json' if _DOCS_ENABLED else None,
+)
 
 # CORS 配置：仅允许本地来源（前端与后端同源反代部署时实际不触发跨域）
 _cors_origins = [
@@ -481,25 +602,81 @@ CONFIG_FILE = os.environ.get(
 _config = {}
 
 
-def _save_config():
-    """把当前配置（含密码哈希）写回配置文件。"""
+def _atomic_write_json(path, data):
+    """原子写 JSON：临时文件 + fsync + os.replace。
+
+    直接 open(path,'w') 在写入过程中被 kill/OOM/磁盘写满时会留下半截文件，
+    下次启动解析失败 → 任务/密码被当成"空"处理，进而被空内容覆盖（数据永久丢失）。
+    """
+    tmp = f'{path}.tmp'
     try:
-        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-            json.dump(_config, f, ensure_ascii=False, indent=2)
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        return True
     except Exception as e:
-        print(f'⚠️ 配置持久化失败: {e}')
+        print(f'⚠️ 原子写失败 {path}: {e}')
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+        return False
+
+
+def _quarantine_corrupt_file(path):
+    """把损坏的持久化文件改名保留（便于人工恢复），返回新路径。"""
+    try:
+        bad = f'{path}.corrupt-{datetime.now().strftime("%Y%m%d%H%M%S")}'
+        os.replace(path, bad)
+        return bad
+    except Exception:
+        return None
+
+
+def _save_config():
+    """把当前配置（含密码哈希）原子写回配置文件。"""
+    with config_lock:
+        if _config_load_failed:
+            print('⚠️ 配置此前读取失败，出于安全考虑拒绝写回（避免覆盖原文件）')
+            return
+        if not _atomic_write_json(CONFIG_FILE, dict(_config)):
+            print('⚠️ 配置持久化失败')
 
 
 def _load_config():
-    """启动时加载配置；首次运行生成默认密码 admin/123456 的加盐哈希并落盘。"""
-    global _password_hash
+    """启动时加载配置。
+
+    安全要求：**配置文件损坏时绝不自动重置为默认口令**（老实现会静默把管理员密码改回
+    admin/123456 并落盘，等于把后台交出去）。损坏时保留原文件并禁用写回，只允许用
+    环境变量 ADMIN_PASSWORD 重置。
+    """
+    global _password_hash, _config_load_failed
     cfg = {}
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 cfg = json.load(f)
         except Exception as e:
-            print(f'⚠️ 配置读取失败，将使用默认配置: {e}')
+            _config_load_failed = True
+            bad = _quarantine_corrupt_file(CONFIG_FILE)
+            print(f'⚠️ 配置文件损坏（已保留为 {bad}）：{e}')
+            env_pwd = os.environ.get('ADMIN_PASSWORD', '')
+            if env_pwd:
+                _password_hash = _hash_password(env_pwd)
+                _config.clear()
+                _config['password'] = _password_hash
+                _config['save_session'] = False
+                print('✅ 已按环境变量 ADMIN_PASSWORD 重置管理员密码')
+                return
+            print('❌ 无法确定管理员密码：请修复配置后重启，或设置环境变量 ADMIN_PASSWORD 重置密码')
+            _password_hash = _hash_password(secrets.token_urlsafe(24))  # 随机口令，避免出现默认口令
+            _config.clear()
+            _config['password'] = _password_hash
+            _config['save_session'] = False
+            return
             cfg = {}
     # 持久化字段：password（管理员密码哈希）、save_session（是否保存抖音登录数据，默认关闭）
     password = cfg.get('password')
@@ -562,9 +739,11 @@ def require_auth(authorization: str = Header(None)):
 
 
 def require_init():
-    """校验浏览器是否已初始化，未初始化返回友好提示"""
+    """校验浏览器是否已初始化**且仍然可用**，否则返回友好提示。"""
     if not init:
         return {'code': 400, 'data': '浏览器未初始化，请先在首页初始化浏览器'}
+    if not _driver_alive():
+        return {'code': 400, 'data': '浏览器会话已失效，请点击「重新初始化浏览器」恢复'}
     return None
 
 
@@ -608,16 +787,18 @@ def log(msg: str):
 
 
 def _save_tasks():
-    """将当前定时任务（含已停用）持久化到 JSON 文件；须在 tasks_lock 内调用"""
-    try:
-        data = {
-            'scheduled': {task_id: _job_to_meta(job) for task_id, job in scheduled_tasks.items()},
-            'paused': dict(paused_tasks),
-        }
-        with open(TASKS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f'⚠️ 任务持久化失败: {e}')
+    """将当前定时任务（含已停用）原子写回 JSON 文件；须在 tasks_lock 内调用。"""
+    if _tasks_load_failed:
+        print('⚠️ 任务文件此前读取失败，出于保护拒绝写回（避免用空列表覆盖原文件）')
+        return
+    data = {
+        'scheduled': {task_id: _job_to_meta(job) for task_id, job in scheduled_tasks.items()},
+        'paused': dict(paused_tasks),
+        # 未注册成功的待恢复任务也要落盘，否则会被静默丢弃
+        'pending': dict(_pending_tasks),
+    }
+    if not _atomic_write_json(TASKS_FILE, data):
+        print('⚠️ 任务持久化失败')
 
 
 def _load_tasks():
@@ -633,7 +814,9 @@ def _load_tasks():
         _pending_tasks.update(data.get('scheduled', {}))
         log(f'📂 已从磁盘恢复 {len(_pending_tasks)} 个定时任务、{len(paused_tasks)} 个已停用任务')
     except Exception as e:
-        print(f'⚠️ 任务恢复失败: {e}')
+        _tasks_load_failed = True
+        bad = _quarantine_corrupt_file(TASKS_FILE)
+        print(f'⚠️ 任务文件损坏（已保留为 {bad}），本次不覆盖磁盘文件：{e}')
 
 
 def _restore_scheduled_tasks():
@@ -659,10 +842,11 @@ _load_tasks()
 
 
 # 定时线程
-def _scheduled_send(name, text):
+def _scheduled_send(name, text, _retried=False):
     """定时任务执行入口：调用发送并输出执行结果日志（供 schedule 调度）。
 
-    入参保持 (name, text) 形态，与任务持久化/编辑解析逻辑一致。
+    入参保持 (name, text) 形态，与任务持久化/编辑解析逻辑一致；
+    _retried 标记用于"顺延重试一次"，避免无限重试。
     """
     preview = (text or '')[:30]
     # 浏览器未就绪时不执行（也不报错）：避免容器刚启动、还没点「初始化浏览器」时误判为发送失败
@@ -727,6 +911,16 @@ start_time = datetime.now(timezone.utc)
 
 
 # 抖音操作
+@app.get('/healthz')  # 健康检查（免鉴权）：仅返回各组件是否存活，不泄露敏感信息
+def healthz():
+    browser_ok = bool(init) and _driver_alive()
+    return {
+        'backend': 'Yes',
+        'browser': 'Yes' if browser_ok else 'No',
+        'scheduler': 'Yes' if _scheduler_alive() else 'No',
+    }
+
+
 @app.get('/Home')
 def Home(authorization: str = Header(None)):
     auth_err = require_auth(authorization)
@@ -847,6 +1041,18 @@ def _reset_driver_state():
         douyin = None
         init = False
         Login_is_bool = False
+        # 兜底：quit() 失败/僵死时可能有 Chromium 仍在跑，继续用同一资料目录会损坏登录态
+        profile_dir = os.path.join(os.path.dirname(os.path.abspath(CONFIG_FILE)), 'chrome-profile')
+        if _chromium_using_profile(profile_dir):
+            log('🧹 检测到残留的 Chromium 仍占用资料目录，正在结束它们…')
+            try:
+                subprocess.run(['pkill', '-f', f'--user-data-dir={profile_dir}'], timeout=8, capture_output=True)
+            except Exception:
+                pass
+            for _ in range(10):
+                if not _chromium_using_profile(profile_dir):
+                    break
+                time.sleep(0.5)
 
 
 def _create_browser_locked():
@@ -860,6 +1066,13 @@ def _create_browser_locked():
         options = unban_config()  # 每次新建，重试初始化不会叠加重复参数
         new_driver = webdriver.Chrome(service=service, options=options) if service else webdriver.Chrome(options=options)
         try:
+            # 关键：给 WebDriver 命令加超时。页面卡死时若无超时，调用会永久阻塞，
+            # 而调用方持有 driver_lock，会把所有 API 线程一起拖死（连登录接口都打不开）
+            try:
+                new_driver.set_page_load_timeout(45)
+                new_driver.set_script_timeout(20)
+            except Exception:
+                pass
             new_driver.set_window_size(1280, 720)
             new_driver.get('https://www.douyin.com/chat?isPopup=1')
         except Exception:
@@ -999,21 +1212,42 @@ def Login(payload: dict = Body(None), authorization: str = Header(None)):
             cookie_data = json.loads(cookie_json)
         except Exception as e:
             return {'code': 404, 'data': f'login-error-cookie parse error: {str(e)}'}
+        if not cookie_data:
+            return {'code': 404, 'data': 'Cookie 内容为空，请重新导出后再试'}
         with driver_lock:
+            # 先清空旧 Cookie：避免"半套新 Cookie + 旧 Cookie"混用导致状态不明
             try:
-                for cookie in cookie_data:
+                driver.delete_all_cookies()
+            except Exception:
+                pass
+            failed = []
+            for cookie in cookie_data:
+                try:
                     driver.add_cookie(cookie)
-                driver.refresh()
-            except Exception as e:
-                return {'code': 404, 'data': f'login-error-cookie parse error: {str(e)}'}
+                except Exception as e:
+                    failed.append(str(e)[:40])
+            if failed:
+                log(f'⚠️ 导入 Cookie 有 {len(failed)}/{len(cookie_data)} 条失败：{failed[:3]}')
+                if len(failed) == len(cookie_data):
+                    return {'code': 404, 'data': 'Cookie 导入失败（域名/格式不匹配），请重新导出'}
+            # 回到聊天页并**正向等待**登录后才存在的标志，避免"没看到登录面板"就判成功
             try:
-                login_type_element = driver.find_element(By.XPATH, '//*[@id="douyin_login_comp_flat_panel"]/picture')
-                login_type = login_type_element.text
-                return {'code': 404, 'data': 'login-error-cooker cant login'}
-            except NoSuchElementException:
-                Login_is_bool = True
-                log('🔑 登录状态变更：Cookie 登录成功')
-                return {'code': 200, 'data': 'ok'}
+                driver.get(DOUYIN_CHAT_URL)
+            except Exception:
+                pass
+            deadline = time.time() + 20
+            while time.time() < deadline:
+                try:
+                    driver.find_element(By.XPATH, '//div[@class="conversationConversationListwrapper"]')
+                    Login_is_bool = True
+                    log('🔑 登录状态变更：Cookie 登录成功')
+                    return {'code': 200, 'data': 'ok'}
+                except NoSuchElementException:
+                    time.sleep(0.5)
+                except Exception:
+                    time.sleep(0.5)
+            Login_is_bool = False
+            return {'code': 404, 'data': 'login-error-cooker cant login（Cookie 可能已失效）'}
     else:
         return {'code': 404, 'data': 'login-error-not cooker'}  # # @#z
 
@@ -1144,6 +1378,9 @@ def GetFrindesList(authorization: str = Header(None)):
     try:
         friends_list = douyin.Updara_FrinderList()
         dicts = {}
+        if friends_list is None:
+            # 页面未就绪 / 解析异常：明确报错，避免和"真的没有好友"混淆（老实现都返回 200 空列表）
+            return {'code': 404, 'data': '读取好友列表失败：聊天页未就绪或页面结构已变化，请稍后重试'}
         if len(friends_list) == 0:
             # 空列表是正常状态，返回 200 + 空列表，避免前端每次误弹「暂无好友」错误
             return {'code': 200, 'data': {'count': 0, 'list': dicts}}
@@ -1394,12 +1631,32 @@ def _set_remote_active(active):
     global _remote_control_active
     with _remote_control_lock:
         _remote_control_active = bool(active)
+        if active:
+            # 新建会话时刷新输入时间，避免刚连上就被判定为"闲置"
+            global _last_remote_input_at
+            _last_remote_input_at = time.time()
+
+
+def remote_session_open():
+    """是否有远程画面会话正在连着（严格：用于单会话互斥）。"""
+    with _remote_control_lock:
+        return bool(_remote_control_active)
+
+
+# 远程会话空闲多久后视为结束：避免"标签页挂着没操作"导致定时任务全天被跳过
+_REMOTE_IDLE_SECONDS = 180
 
 
 def remote_control_active():
-    """有人远程操作时，定时任务应让路（否则会打断人工验证）。"""
+    """是否有人**正在**远程操作浏览器（以最近真实输入为准，且有闲置过期）。
+
+    老实现只看"有没有 WebSocket 连接"，标签页挂着就一直算占用，当晚的定时任务会被
+    静默跳过且不再重试（用户第二天才发现火花断了）。
+    """
     with _remote_control_lock:
-        return _remote_control_active
+        if not _remote_control_active:
+            return False
+        return (time.time() - _last_remote_input_at) < _REMOTE_IDLE_SECONDS
 
 
 def _vnc_enabled():
@@ -1415,20 +1672,26 @@ def _dismiss_browser_dialogs(reason=''):
     """
     if not SHOW_BROWSER or not os.environ.get('DISPLAY'):
         return
+    activated = False
     try:
         # 必须先把浏览器窗口激活，否则 Esc 落到别的窗口上不起作用
-        subprocess.run(['xdotool', 'search', '--name', 'douyin',
-                        'windowactivate', '--sync'],
-                       timeout=5, capture_output=True)
+        r = subprocess.run(['xdotool', 'search', '--name', 'douyin',
+                            'windowactivate', '--sync'],
+                           timeout=5, capture_output=True)
+        activated = (r.returncode == 0)
     except Exception:
-        pass
+        activated = False
     try:
-        subprocess.run(['xdotool', 'key', '--clearmodifiers', 'Escape'],
-                       timeout=5, capture_output=True)
-        if reason:
-            log(f'🧹 已清理浏览器模态弹窗（{reason}）')
+        r = subprocess.run(['xdotool', 'key', '--clearmodifiers', 'Escape'],
+                           timeout=5, capture_output=True)
+        ok = (r.returncode == 0)
     except Exception:
-        pass
+        ok = False
+    # 只有真正成功才记成功日志：老实现无条件打印"已清理"，openbox 挂掉时会掩盖真实故障
+    if reason and ok and activated:
+        log(f'🧹 已清理浏览器模态弹窗（{reason}）')
+    elif reason and not activated:
+        log(f'⚠️ 未能激活浏览器窗口（openbox 可能已退出），弹窗清理可能失效（{reason}）')
 
 
 DOUYIN_CHAT_URL = 'https://www.douyin.com/chat?isPopup=1'
@@ -1606,8 +1869,8 @@ def ScreenTicket(authorization: str = Header(None)):
         return {'code': 500, 'data': '服务端缺少 websockets 依赖，无法建立画面串流'}
     if not (init and _driver_alive()):
         return {'code': 400, 'data': '浏览器未初始化，请先在首页点击「初始化浏览器」'}
-    if remote_control_active():
-        return {'code': 409, 'data': '已有其它页面正在远程操作浏览器，请先关闭那个页面'}
+    if remote_session_open():
+        return {'code': 409, 'data': '已有其它页面正在远程连接浏览器，请先关闭那个页面'}
     return {'code': 200, 'data': {'ticket': _issue_screen_ticket(), 'expires_in': _SCREEN_TICKET_TTL}}
 
 
@@ -1618,6 +1881,10 @@ async def ScreenStream(websocket: WebSocket):
         return
     if websockets is None or not (init and _driver_alive()):
         await websocket.close(code=4400)
+        return
+    # 空窗防护：签发票据与真正建连之间可能被另一个页面插队，这里再判一次
+    if remote_session_open():
+        await websocket.close(code=4409)
         return
 
     ws_url = await asyncio.to_thread(_devtools_ws_url)
@@ -2025,25 +2292,41 @@ login_attempts_lock = threading.Lock()
 
 
 def _client_ip(request):
-    """优先取 X-Forwarded-For（反代后真实客户端 IP），否则回退直连地址。"""
+    """取真实客户端 IP。
+
+    安全要点：**只信任 X-Forwarded-For 的最后一段**。nginx 用
+    `$proxy_add_x_forwarded_for` 会把客户端自带的 XFF 放在前面、真实地址追加在最后；
+    老实现取第一段，攻击者每个请求换一个伪造 XFF 就能让"5 次失败锁定"完全失效。
+    """
     if request is None:
         return '127.0.0.1'
-    xff = (request.headers.get('x-forwarded-for') or '').split(',')[0].strip()
+    xff = (request.headers.get('x-forwarded-for') or '').strip()
     if xff:
-        return xff
+        parts = [p.strip() for p in xff.split(',') if p.strip()]
+        if parts:
+            return parts[-1]
     return request.client.host if request.client else '127.0.0.1'
 
 
 def _is_login_locked(ip):
     with login_attempts_lock:
+        now = time.time()
+        # 顺带清理过期条目：防止伪造 IP 让字典无限增长（长期运行的内存泄漏）
+        for key in [k for k, v in list(_login_attempts.items())
+                    if now - (v[1] if isinstance(v, (list, tuple)) and len(v) > 1 else 0) > _LOGIN_LOCK_WINDOW]:
+            _login_attempts.pop(key, None)
         entry = _login_attempts.get(ip)
         if not entry:
             return False
         fails, last_ts = entry
-        if time.time() - last_ts > _LOGIN_LOCK_WINDOW:
+        if now - last_ts > _LOGIN_LOCK_WINDOW:
             _login_attempts.pop(ip, None)
             return False
-        return fails >= _LOGIN_MAX_FAILS
+        if fails >= _LOGIN_MAX_FAILS:
+            return True
+        # 全局兜底：与 IP 无关的总失败量过高也锁一段时间，抵御分布式/伪造 IP 的爆破
+        total = sum(int(v[0] or 0) for v in _login_attempts.values() if isinstance(v, (list, tuple)))
+        return total >= _LOGIN_MAX_FAILS * 6
 
 
 def _record_login_fail(ip):
@@ -2134,7 +2417,65 @@ def _startup_restore():
     start_scheduler()  # 在 tasks_lock 之外调用，避免与 init_lock → tasks_lock 的加锁顺序相反
 
 
+def _auto_init_browser():
+    """启动后自动初始化浏览器（默认开启，AUTO_INIT_BROWSER=0 可关闭）。
+
+    没有这一步时：每次容器重启/宿主机重启后，浏览器都不会被创建，
+    定时任务到点只会静默跳过（"⏭️ 浏览器未初始化"），用户往往几天后才发现火花断了。
+    """
+    if os.environ.get('AUTO_INIT_BROWSER', '1').strip().lower() in ('0', 'false', 'no', 'off'):
+        log('ℹ️ AUTO_INIT_BROWSER=0，跳过启动自动初始化浏览器')
+        return
+    for attempt in range(1, 6):
+        time.sleep(3 if attempt == 1 else min(60, 8 * attempt))
+        if init and _driver_alive():
+            return
+        try:
+            with init_lock:
+                if init and _driver_alive():
+                    return
+                if init:
+                    _reset_driver_state()
+                res = _create_browser_locked()
+            if (res or {}).get('code') == 200:
+                log('🚀 启动自动初始化浏览器成功')
+                return
+            log(f'⚠️ 启动自动初始化浏览器未成功（第 {attempt} 次）：{res}')
+        except Exception as e:
+            log(f'⚠️ 启动自动初始化浏览器异常（第 {attempt} 次）：{e}')
+    log('⚠️ 自动初始化浏览器多次失败，请到首页手动点击「初始化浏览器」')
+
+
+def _browser_watchdog():
+    """浏览器看门狗：周期性探测浏览器，崩溃/会话失效时自动重建（BROWSER_WATCHDOG=0 可关闭）。
+
+    同时顺带清理可能出现的模态弹窗（用户最近有输入时不打扰）。
+    """
+    if os.environ.get('BROWSER_WATCHDOG', '1').strip().lower() in ('0', 'false', 'no', 'off'):
+        return
+    while True:
+        time.sleep(60)
+        try:
+            if not init:
+                continue
+            if _driver_alive():
+                if not _remote_input_recent(10):
+                    _dismiss_browser_dialogs()
+                continue
+            log('🩺 看门狗发现浏览器已失效，尝试自动重建…')
+            with init_lock:
+                if driver and not _driver_alive():
+                    _reset_driver_state()
+                if not init:
+                    res = _create_browser_locked()
+                    log(f'🩺 自动重建结果：{res}')
+        except Exception as e:
+            log(f'⚠️ 看门狗异常：{e}')
+
+
 _startup_restore()
+threading.Thread(target=_auto_init_browser, daemon=True, name='auto-init-browser').start()
+threading.Thread(target=_browser_watchdog, daemon=True, name='browser-watchdog').start()
 
 
 if __name__ == "__main__":

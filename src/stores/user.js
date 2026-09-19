@@ -5,7 +5,19 @@ import { ref, computed } from 'vue'
 export const useUserStore = defineStore('user', () => {
   // 状态
   const token = ref(localStorage.getItem('token') || '')
-  const userInfo = ref(JSON.parse(localStorage.getItem('userInfo') || '{}'))
+  // 反序列化加保护：localStorage 内容损坏时不能抛异常（store 在路由守卫里首次初始化，
+// 抛错会导致整个应用白屏且刷新无效，只能手动清站点数据才能恢复）
+const readUserInfo = () => {
+  try {
+    return JSON.parse(localStorage.getItem('userInfo') || '{}') || {}
+  } catch (e) {
+    try {
+      localStorage.removeItem('userInfo')
+    } catch (e2) {}
+    return {}
+  }
+}
+const userInfo = ref(readUserInfo())
 
   // 计算属性
   const isLoggedIn = computed(() => !!token.value)

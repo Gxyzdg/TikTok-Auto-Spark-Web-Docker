@@ -189,18 +189,16 @@ const closeSidebar = () => {
 // 全局轮询浏览器/登录状态，保持侧边栏状态点实时
 let statusTimer = null
 const pollStatus = async () => {
+  // 注意：请求失败只代表"没问到"，不能因此把状态判成"否"
+  // （否则网络抖一次，侧边栏就红着喊"浏览器未初始化"，与首页/向导页互相打脸）
   try {
     const res = await getInitStatus()
     setBrowserStatus(res.data === 'Yes')
-  } catch (e) {
-    setBrowserStatus(false)
-  }
+  } catch (e) {}
   try {
     const res = await getLoginStatus()
     setLoginStatus(res.data === 'Yes')
-  } catch (e) {
-    setLoginStatus(false)
-  }
+  } catch (e) {}
 }
 
 onMounted(() => {
@@ -530,7 +528,10 @@ const handleCommand = (command) => {
 }
 
 .collapse-btn:hover,
-
+.theme-toggle:hover {
+  color: var(--primary);
+  background: var(--surface-muted);
+}
 
 .header-right {
   display: flex;

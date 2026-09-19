@@ -18,7 +18,7 @@ ARG APP_VERSION=v1.5.0
 ENV VITE_APP_VERSION=${APP_VERSION}
 WORKDIR /build
 COPY package.json package-lock.json ./
-RUN npm install --no-audit --no-fund
+RUN npm ci --no-audit --no-fund   # 严格按 package-lock.json 安装，保证可复现
 COPY . .
 RUN npm run build
 # 产物在 /build/dist
@@ -107,7 +107,8 @@ VOLUME ["/data"]
 
 EXPOSE 80 9844 5900 6080
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:80/ > /dev/null 2>&1 && curl -fsS http://127.0.0.1:9844/docs > /dev/null 2>&1 || exit 1
+# 健康检查：前端静态页 + 后端 /healthz（不再依赖 /docs，生产已默认关闭 Swagger）
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:80/ > /dev/null 2>&1 && curl -fsS http://127.0.0.1:9844/healthz > /dev/null 2>&1 || exit 1
 
 ENTRYPOINT ["/entrypoint.sh"]

@@ -351,11 +351,7 @@ const checkStatus = async () => {
       loadDouyinUser()
     }
   } catch (error) {
-    browserStatus.value = false
-    loginStatus.value = false
-    schedulerStatus.value = false
-    setBrowserStatus(false)
-    setLoginStatus(false)
+    // 请求失败只代表"这次没问到"，保留上一次已知状态，避免一次抖动把整个看板判成未初始化
   }
 }
 

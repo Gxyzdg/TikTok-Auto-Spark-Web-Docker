@@ -20,6 +20,14 @@ services:
       VNC_ENABLED: "1"
     volumes:
       - spark-tasks:/data    # 定时任务 + 管理员密码持久化（重建容器不丢失）
+    # 资源上限：Chromium 长期运行内存会涨，加上限可避免宿主 OOM 时连累其它服务
+    mem_limit: 3g
+    shm_size: 1g             # Chromium 需要足够的 /dev/shm
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     # 抖音需可访问外网（默认桥接网络即可）；如需固定出口 IP 请自行调整网络
 
 volumes:

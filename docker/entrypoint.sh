@@ -13,6 +13,10 @@ VNC_ENABLED="${VNC_ENABLED:-1}"
 # 对外端口（与 docker-compose 的端口映射保持一致）：仅用于前端界面展示，
 # 让首页「前端端口 / API 地址 / noVNC 端口」跟随自定义映射自动变化。
 NOVNC_PORT="${NOVNC_PORT:-6080}"
+if [ "$VNC_PASSWORD" = "123456" ]; then
+    echo "[entrypoint] ⚠️ 安全提醒：VNC 密码仍是默认值 123456。noVNC 能直接看到并操作容器里已登录的抖音，"
+    echo "[entrypoint] ⚠️ 建议在 docker-compose.yml 里改成强密码；若不需要 VNC，把 VNC_ENABLED 设为 0 彻底关闭。"
+fi
 # 注意：这里**不给默认值**——没映射后端端口时保持为空，前端会隐藏「API 地址」一行
 API_PORT="${API_PORT:-}"
 
@@ -43,7 +47,16 @@ XVFB_PID=$!
 sleep 1
 
 echo "[entrypoint] 启动窗口管理器 openbox（让窗口可拖动/带标题栏）..."
-DISPLAY="$DISPLAY" openbox --sm-disable >/tmp/openbox.log 2>&1 &
+# 受监管启动：openbox 退出后自动重启。
+# 它一旦挂掉，xdotool windowactivate 会失效 → 抖音的外部协议模态弹窗无法被自动关闭 →
+# 页面输入被吞（v1.5.0 花大力气修的问题会复现），所以必须保证它一直活着。
+(
+  while :; do
+    DISPLAY="$DISPLAY" openbox --sm-disable >>/tmp/openbox.log 2>&1
+    echo "[entrypoint] openbox 退出，1 秒后重启..." >>/tmp/openbox.log
+    sleep 1
+  done
+) &
 OPENBOX_PID=$!
 sleep 1
 

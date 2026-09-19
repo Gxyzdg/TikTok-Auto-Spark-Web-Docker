@@ -61,7 +61,7 @@
           <div
             v-else
             class="screen-wrap"
-            :class="{ grabbing: dragging, 'is-fullscreen': fullscreen }"
+            :class="{ grabbing: dragging, 'is-fullscreen': fullscreen, 'is-live': live }"
             @pointerdown="onPointerDown"
             @pointermove="onPointerMove"
             @pointerup="onPointerUp"
@@ -276,6 +276,10 @@ let lastFrameAt = 0
 let frameCount = 0
 let objectUrl = ''
 let dragging = false
+let streamToken = 0        // 连接所有权令牌：只有最新的那次请求可以建连/改状态
+let disposed = false       // 组件已卸载标记：await 期间卸载就不再建连（否则会留下无人持有的僵尸连接）
+let pulling = false        // 截图模式并发闸门：避免慢请求堆积、旧帧覆盖新帧
+let polling = false        // 登录轮询并发闸门
 
 // ---------- 状态 ----------
 const refreshAll = async () => {
@@ -284,6 +288,7 @@ const refreshAll = async () => {
     const res = await getScreenInfo()
     const d = res.data || {}
     browserOk.value = !!d.browser
+    setBrowserStatus(!!d.browser)      // 写回全局，避免侧边栏与向导页状态打架
     vncEnabled.value = d.vnc_enabled !== false
     if (d.viewport) {
       viewport.width = d.viewport.width
@@ -294,7 +299,7 @@ const refreshAll = async () => {
       pageInfo.url = d.page.url || ''
     }
   } catch (e) {
-    browserOk.value = false
+    // 请求失败只代表"没问到"，**不能**因此把浏览器判成未初始化（否则画面区会被整块卸载）
   }
   try {
     const res = await getLoginStatus()
@@ -317,36 +322,54 @@ const loadAccount = async () => {
 
 // ---------- 画面串流（CDP） ----------
 const stopStream = (silent = false) => {
-  if (ws) {
+  streamToken++          // 让仍在 await 中的旧请求失效
+  const sock = ws
+  ws = null
+  if (sock) {
+    // 先摘掉回调再关闭：否则旧连接的 onclose 会来关掉"当前这条好连接"
+    sock.onmessage = null
+    sock.onerror = null
+    sock.onclose = null
     try {
-      ws.onclose = null
-      ws.close()
+      sock.close()
     } catch (e) {}
-    ws = null
   }
   live.value = false
-  if (!fallback.value) streamState.value = 'idle'
+  streamState.value = 'idle'   // 无论是否处于截图模式都复位状态文案
   fps.value = 0
   frameKb.value = 0
-  if (!silent && !fallback.value) ElMessage.info('已断开远程画面')
+  // 清掉最后一帧：否则断开后画面定格，用户以为还连着、点了却没反应
+  frameSrc.value = ''
+  if (objectUrl) {
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 800)
+    objectUrl = ''
+  }
+  if (!silent) ElMessage.info('已断开远程画面')
 }
 
 const startStream = async () => {
   if (live.value || connecting.value) return
+  if (fallback.value) toggleFallback()   // 与截图模式互斥，避免两个画面源互相覆盖
+  const my = ++streamToken
   connecting.value = true
   streamState.value = 'connecting'
   try {
     const res = await getScreenTicket()
+    // 请求期间组件被卸载 / 又被点了别的操作 → 放弃建连（否则留下无人关闭的僵尸连接，
+    // 并且会把后端"单会话"标志长期占住，导致之后再也连不上）
+    if (disposed || my !== streamToken) return
     const ticket = res.data && res.data.ticket
     if (!ticket) {
       streamState.value = 'error'
       return
     }
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
-    ws = new WebSocket(`${proto}://${window.location.host}/api/Api/Screen/Stream?ticket=${encodeURIComponent(ticket)}`)
-    ws.binaryType = 'blob'
-    ws.onmessage = onWsMessage
-    ws.onclose = (ev) => {
+    const socket = new WebSocket(`${proto}://${window.location.host}/api/Api/Screen/Stream?ticket=${encodeURIComponent(ticket)}`)
+    ws = socket
+    socket.binaryType = 'blob'
+    socket.onmessage = (ev) => { if (socket === ws) onWsMessage(ev) }
+    socket.onclose = (ev) => {
+      if (socket !== ws) return       // 旧连接的回调不得影响当前连接
       const wasLive = live.value
       stopStream(true)
       if (ev.code === 4401) {
@@ -360,14 +383,14 @@ const startStream = async () => {
         streamState.value = 'error'
       }
     }
-    ws.onerror = () => {
-      streamState.value = 'error'
+    socket.onerror = () => {
+      if (socket === ws) streamState.value = 'error'
     }
   } catch (e) {
     // 错误提示由响应拦截器统一处理（如"浏览器未初始化"）
     streamState.value = 'error'
   } finally {
-    connecting.value = false
+    if (my === streamToken) connecting.value = false
   }
 }
 
@@ -408,29 +431,51 @@ const onWsMessage = (ev) => {
 }
 
 // ---------- 截图兜底模式 ----------
-const toggleFallback = () => {
-  fallback.value = !fallback.value
-  if (fallback.value) {
-    stopStream(true)
-    streamState.value = 'fallback'
-    pullScreenshot()
-    fallbackTimer = setInterval(pullScreenshot, 1000)
-    ElMessage.info('已开启截图模式（每秒一张，CDP 不通时使用）')
-  } else {
-    if (fallbackTimer) {
-      clearInterval(fallbackTimer)
-      fallbackTimer = null
-    }
-    streamState.value = 'idle'
-    frameSrc.value = ''
+const stopFallback = () => {
+  if (fallbackTimer) {
+    clearTimeout(fallbackTimer)
+    fallbackTimer = null
   }
 }
 
+const toggleFallback = () => {
+  if (fallback.value) {
+    // 关闭截图模式：同时确保 WebSocket 也断开，避免两个画面源互相覆盖
+    fallback.value = false
+    stopFallback()
+    stopStream(true)
+    streamState.value = 'idle'
+    frameSrc.value = ''
+    return
+  }
+  fallback.value = true
+  stopStream(true)          // 互斥：先断开实时串流
+  streamState.value = 'fallback'
+  pullScreenshot()
+  schedulePull()
+  ElMessage.info('已开启截图模式（每秒一张，CDP 不通时使用）')
+}
+
+// 自调度而不是 setInterval：上一张没回来就不再发下一张（避免请求堆积、旧帧覆盖新帧）
+const schedulePull = () => {
+  if (!fallback.value) return
+  stopFallback()
+  fallbackTimer = setTimeout(async () => {
+    await pullScreenshot()
+    schedulePull()
+  }, 1000)
+}
+
 const pullScreenshot = async () => {
+  if (pulling) return
+  pulling = true
   try {
     const res = await getScrlk()
-    if (res.data) frameSrc.value = `data:image/png;base64,${res.data}`
-  } catch (e) {}
+    if (res.data && fallback.value) frameSrc.value = `data:image/png;base64,${res.data}`
+  } catch (e) {
+  } finally {
+    pulling = false
+  }
 }
 
 // ---------- 输入转发 ----------
@@ -538,6 +583,8 @@ const submitSms = async () => {
 }
 
 const pollLogin = async () => {
+  if (polling) return
+  polling = true
   try {
     const res = await getLoginStatus()
     const ok = res.data === 'Yes'
@@ -552,18 +599,43 @@ const pollLogin = async () => {
     } else if (!ok && loginStatus.value) {
       setLoginStatus(false)
     }
-  } catch (e) {}
+  } catch (e) {
+  } finally {
+    polling = false
+  }
 }
+
+// 页面隐藏时暂停轮询（手机上切后台/锁屏后不再空跑请求），回来后立刻补一次
+const handleVisibility = () => {
+  if (document.hidden) {
+    if (pollTimer) {
+      clearInterval(pollTimer)
+      pollTimer = null
+    }
+  } else {
+    if (!pollTimer) {
+      pollLogin()
+      pollTimer = setInterval(pollLogin, pollInterval())
+    }
+  }
+}
+
+// 串流/截图模式下把轮询降频到 10 秒，减少对后端浏览器锁的争用
+const pollInterval = () => (live.value || fallback.value ? 10000 : 5000)
 
 onMounted(async () => {
   await refreshAll()
-  pollTimer = setInterval(pollLogin, 3000)
+  pollTimer = setInterval(pollLogin, pollInterval())
+  document.addEventListener('visibilitychange', handleVisibility)
 })
 
 onUnmounted(() => {
+  disposed = true          // 标记卸载：让 in-flight 的建连请求直接放弃
+  document.removeEventListener('visibilitychange', handleVisibility)
   stopStream(true)
+  stopFallback()
   if (pollTimer) clearInterval(pollTimer)
-  if (fallbackTimer) clearInterval(fallbackTimer)
+  pollTimer = null
   if (objectUrl) URL.revokeObjectURL(objectUrl)
 })
 </script>
@@ -681,7 +753,6 @@ onUnmounted(() => {
   background: var(--surface-muted);
   overflow: hidden;
   cursor: crosshair;
-  touch-action: none;
   min-height: 320px;
   display: flex;
   align-items: center;
@@ -690,6 +761,11 @@ onUnmounted(() => {
 
 .screen-wrap.grabbing {
   cursor: grabbing;
+}
+
+/* 只有真正连着画面时才禁止触摸滚动：否则移动端在没连接时无法滚动页面（滚动死区） */
+.screen-wrap.is-live {
+  touch-action: none;
 }
 
 /* 放大：手机上把画面铺满整屏，方便看清并操作 */
@@ -1012,6 +1088,12 @@ onUnmounted(() => {
 
   .sms-row .el-input {
     flex: 1 1 150px;
+  }
+
+  /* 手机上把底部小按钮放大到可稳定点击的尺寸 */
+  .key-row .el-button {
+    min-height: 40px;
+    flex: 1 1 auto;
   }
 }
 </style>

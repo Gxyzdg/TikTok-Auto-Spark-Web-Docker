@@ -2,22 +2,17 @@
   <div class="page">
     <div class="toolbar animate-fade-in-up">
       <el-button :icon="Refresh" @click="refreshAll" :loading="loading">刷新</el-button>
-      <el-button v-if="!selectionMode" type="primary" :icon="Plus" @click="openAddDialog">
-        添加任务
-      </el-button>
-      <el-button
-        v-if="!selectionMode && taskList.length > 0"
-        type="success"
-        :icon="Tickets"
-        @click="selectionMode = true"
-      >
-        多选
-      </el-button>
-      <template v-else>
+      <template v-if="selectionMode">
         <el-button type="danger" :icon="Delete" @click="handleBatchDelete" :loading="batchDeleteLoading">
           删除 ({{ selectedTasks.length }})
         </el-button>
         <el-button :icon="Close" @click="cancelSelection">取消</el-button>
+      </template>
+      <template v-else>
+        <el-button type="primary" :icon="Plus" @click="openAddDialog">添加任务</el-button>
+        <el-button v-if="taskList.length > 0" type="success" :icon="Tickets" @click="selectionMode = true">
+          多选
+        </el-button>
       </template>
     </div>
 
