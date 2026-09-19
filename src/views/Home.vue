@@ -44,14 +44,8 @@
           <div class="stat-body">
             <span class="stat-label">登录状态</span>
             <span class="stat-value">
-              <el-avatar
-                v-if="loginStatus && douyinAvatar"
-                :size="22"
-                :src="douyinAvatar"
-                class="login-avatar"
-              />
-              <i v-else class="dot" :class="loginStatus ? 'online' : 'offline'"></i>
-              {{ loginStatus ? '已登录' : '未登录' }}
+              <i class="dot" :class="loginStatus ? 'online' : 'offline'"></i>
+              {{ loginStatus ? (douyinNickname ? '已登录 · ' + douyinNickname : '已登录') : '未登录' }}
             </span>
           </div>
         </div>
@@ -258,7 +252,7 @@ import {
   TopRight
 } from '@element-plus/icons-vue'
 import { initBrowser as initBrowserApi, reInitBrowser as reInitBrowserApi, getFriendsList, getTaskList, getHome, getStatus, getUserInfo } from '../api/douyin'
-import { browserStatus, loginStatus, friendsList, douyinAvatar, douyinNickname, setBrowserStatus, setLoginStatus, setFriendsList, setDouyinUser } from '../stores/browser'
+import { browserStatus, loginStatus, friendsList, douyinNickname, setBrowserStatus, setLoginStatus, setFriendsList, setDouyinUser } from '../stores/browser'
 import FlameIcon from '../components/FlameIcon.vue'
 import { formatFriendsList } from '../utils/format'
 import { APP_VERSION, API_HOST, FRONTEND_PORT, NOVNC_PORT, NOVNC_URL } from '../config'
@@ -353,7 +347,7 @@ const checkStatus = async () => {
     setLoginStatus(loginStatus.value)
     schedulerStatus.value = d.scheduler === 'Yes'
     taskCount.value = d.task_count ?? taskCount.value
-    if (loginStatus.value && !douyinAvatar.value) {
+    if (loginStatus.value && !douyinNickname.value) {
       loadDouyinUser()
     }
   } catch (error) {
@@ -827,11 +821,6 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.login-avatar {
-  flex-shrink: 0;
-  border: 1px solid var(--border);
 }
 
 .info-value.uptime {

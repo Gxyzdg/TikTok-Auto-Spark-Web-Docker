@@ -141,7 +141,7 @@
           </div>
 
           <div v-if="loginStatus" class="done-box">
-            <el-avatar :size="40" :src="douyinAvatar" :icon="UserFilled" />
+            <el-icon class="done-icon"><CircleCheckFilled /></el-icon>
             <div class="done-text">
               <div class="done-title">{{ douyinNickname || '已登录' }}</div>
               <div class="done-sub">抖音账号登录成功，可以回到首页使用了</div>
@@ -204,10 +204,10 @@ import {
   Monitor,
   Key,
   InfoFilled,
-  UserFilled,
   Link,
   FullScreen,
-  Check
+  Check,
+  CircleCheckFilled
 } from '@element-plus/icons-vue'
 import {
   getScreenInfo,
@@ -220,7 +220,7 @@ import {
   submitVerifyCode
 } from '../api/douyin'
 import { NOVNC_URL } from '../config'
-import { loginStatus, setLoginStatus, douyinAvatar, douyinNickname, setDouyinUser } from '../stores/browser'
+import { loginStatus, setLoginStatus, douyinNickname, setDouyinUser } from '../stores/browser'
 
 const router = useRouter()
 const vncUrl = NOVNC_URL
@@ -917,6 +917,12 @@ onUnmounted(() => {
   margin-top: 8px;
   font-size: 12px;
   color: var(--text-3);
+}
+
+.done-icon {
+  font-size: 34px;
+  color: var(--success);
+  flex-shrink: 0;
 }
 
 .done-box {

@@ -696,6 +696,7 @@ def _verify_login_state():
         return bool(Login_is_bool)
     if ok != Login_is_bool:
         Login_is_bool = ok
+        globals()['_self_avatar_cache'] = ''   # 登录态变化时清缓存，避免串到上一个账号
         log('🔑 登录状态变更：' + ('已登录' if ok else '未登录（登录面板未通过 / 会话失效）'))
     return ok
 
@@ -1107,17 +1108,9 @@ def _extract_self_avatar():
             return _self_avatar_cache
     except Exception:
         pass
-    # ② DOM 兜底：聊天消息区里自己的头像（取最后一张抖音头像 img）
-    try:
-        imgs = driver.find_elements(By.XPATH, '//img[contains(@src,"douyinpic.com")]')
-        for el in reversed(imgs):
-            src = el.get_attribute('src')
-            if src and 'avatar' in src:
-                _self_avatar_cache = src
-                return src
-    except Exception:
-        pass
-    # ③ 最后返回缓存
+    # 不再做"扫描页面头像 img"的兜底：聊天页里最后一张头像往往是**好友**的头像，
+    # 会被误当成自己的头像返回。取不到就返回空，宁可不显示也不要显示错的。
+    # ② 最后返回缓存（缓存只可能来自上面准确的 JSON 路径）
     return _self_avatar_cache or ''
 
 

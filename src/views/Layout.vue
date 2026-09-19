@@ -100,7 +100,6 @@
           </el-tooltip>
           <el-dropdown trigger="click" @command="handleCommand">
             <span class="user-info" tabindex="0" aria-label="用户菜单">
-              <el-avatar :size="32" :src="douyinAvatar" :icon="UserFilled" class="douyin-avatar" />
               <span class="username">{{ userStore.userInfo.username || 'Admin' }}</span>
               <el-icon><ArrowDown /></el-icon>
             </span>
@@ -132,14 +131,13 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
 import { useUserStore } from '../stores/user'
-import { logout, getInitStatus, getLoginStatus, getUserInfo } from '../api/douyin'
-import { browserStatus, loginStatus, setBrowserStatus, setLoginStatus, douyinAvatar, setDouyinUser } from '../stores/browser'
+import { logout, getInitStatus, getLoginStatus } from '../api/douyin'
+import { browserStatus, loginStatus, setBrowserStatus, setLoginStatus } from '../stores/browser'
 import FlameIcon from '../components/FlameIcon.vue'
 import { APP_VERSION, NOVNC_URL, VNC_ENABLED } from '../config'
 import {
   Fold,
   Expand,
-  UserFilled,
   ArrowDown,
   SwitchButton,
   House,
@@ -209,10 +207,6 @@ const pollStatus = async () => {
   } catch (e) {
     setLoginStatus(false)
   }
-  // 已登录且尚无头像缓存时，拉取抖音账号头像
-  if (loginStatus.value && !douyinAvatar.value) {
-    await loadDouyinUser()
-  }
 }
 
 onMounted(() => {
@@ -249,18 +243,6 @@ const currentMenuSubtitle = computed(() => {
   const menu = menuList.find(item => item.path === activeMenu.value)
   return menu ? menu.sub : ''
 })
-
-// 登录状态下拉取抖音账号头像（右上角显示真实头像）
-const loadDouyinUser = async () => {
-  if (!loginStatus.value) return
-  try {
-    const res = await getUserInfo()
-    const d = res.data || {}
-    setDouyinUser(d.nickname, d.avatar)
-  } catch (e) {
-    // 错误已由响应拦截器统一提示
-  }
-}
 
 const handleMenuSelect = (path) => {
   router.push(path)
