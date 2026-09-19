@@ -37,11 +37,13 @@ ENV PYTHONUNBUFFERED=1 \
     TZ=Asia/Shanghai \
     SCALE_FACTOR=1
 
-# Chromium + 驱动 + 中文字体 + Xvfb/VNC/noVNC + openbox 窗口管理器（让窗口可拖动）+ nginx + 工具
+# Chromium + 驱动 + 中文字体（wqy-microhei，比 noto-cjk 小 ~86MB）
+# + Xvfb/VNC/noVNC + openbox 窗口管理器（让窗口可拖动）+ nginx + 工具
+# 同一层内完成清理，避免删除的内容残留在上层导致镜像膨胀
 RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y --no-install-recommends \
         chromium \
         chromium-driver \
-        fonts-noto-cjk \
+        fonts-wqy-microhei \
         xvfb \
         x11vnc \
         novnc \
@@ -51,7 +53,8 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y --no-ins
         nginx \
         curl \
     && rm -f /etc/nginx/sites-enabled/default \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* /var/cache/* \
+    && rm -f /usr/bin/xdg-open /usr/bin/xdg-settings
 
 # 后端依赖
 WORKDIR /app

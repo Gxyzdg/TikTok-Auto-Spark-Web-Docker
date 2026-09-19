@@ -1,22 +1,16 @@
 <template>
   <div class="page">
-    <div class="page-header animate-fade-in-up">
-      <div>
-        <div class="page-header__title">好友列表</div>
-        <div class="page-header__subtitle">管理你的抖音好友，发送消息或创建定时任务</div>
-      </div>
-      <div class="page-header__actions">
-        <el-button :icon="Refresh" @click="loadFriends" :loading="loading">刷新</el-button>
-        <el-button v-if="!selectionMode" type="success" :icon="Tickets" @click="selectionMode = true">
-          多选
+    <div class="toolbar animate-fade-in-up">
+      <el-button :icon="Refresh" @click="loadFriends" :loading="loading">刷新</el-button>
+      <el-button v-if="!selectionMode" type="success" :icon="Tickets" @click="selectionMode = true">
+        多选
+      </el-button>
+      <template v-else>
+        <el-button type="success" :icon="Check" @click="openBatchTaskDialog">
+          创建定时任务 ({{ selectedFriends.length }})
         </el-button>
-        <template v-else>
-          <el-button type="success" :icon="Check" @click="openBatchTaskDialog">
-            创建定时任务 ({{ selectedFriends.length }})
-          </el-button>
-          <el-button :icon="Close" @click="cancelSelection">取消</el-button>
-        </template>
-      </div>
+        <el-button :icon="Close" @click="cancelSelection">取消</el-button>
+      </template>
     </div>
 
     <el-card shadow="never">
@@ -367,11 +361,6 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.page {
-  max-width: 1280px;
-  margin: 0 auto;
-}
-
 .selected-friends {
   display: flex;
   flex-wrap: wrap;

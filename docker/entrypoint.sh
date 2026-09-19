@@ -48,5 +48,6 @@ cleanup() {
 trap cleanup TERM INT
 
 # 任一核心进程退出（崩溃）则整个容器退出，交给 Docker restart 策略自动拉起。
-wait -n "$BACKEND_PID" "$NGINX_PID" "$VNC_PID" "$NOVNC_PID" "$OPENBOX_PID" "$XVFB_PID"
+# openbox（窗口管理器）不属核心进程：它退出不影响应用运行，若加入 wait 会因它退出导致容器闪退。
+wait -n "$BACKEND_PID" "$NGINX_PID" "$VNC_PID" "$NOVNC_PID" "$XVFB_PID"
 exit $?

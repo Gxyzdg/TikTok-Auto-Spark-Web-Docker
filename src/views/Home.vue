@@ -1,31 +1,31 @@
 <template>
   <div class="page">
-    <!-- 欢迎横幅 -->
-    <section class="hero">
-      <div class="hero-inner">
-        <div class="hero-text">
-          <h1 class="hero-title">欢迎使用抖音火花助手</h1>
-          <p class="hero-subtitle">自动化管理你的抖音好友火花，保持联系不间断</p>
+    <!-- 账号状态条 -->
+    <section class="status-strip">
+      <div class="status-strip__main">
+        <div class="brand-mark"><FlameIcon /></div>
+        <div class="status-strip__text">
+          <div class="status-strip__title">
+            {{ loginStatus && douyinNickname ? douyinNickname : '抖音账号未登录' }}
+          </div>
+          <div class="status-strip__sub">
+            好友 <b>{{ friendsCount }}</b> 位 · 定时任务 <b>{{ taskCount }}</b> 个 · 调度器
+            {{ schedulerStatus ? '运行中' : '未运行' }}
+          </div>
         </div>
-        <div class="hero-actions">
-          <el-tag
-            :type="browserStatus && loginStatus ? 'success' : 'warning'"
-            effect="light"
-            round
-            class="hero-tag"
-          >
-            {{ browserStatus && loginStatus ? '系统运行正常' : '待初始化' }}
-          </el-tag>
-          <el-button :icon="Refresh" round @click="refreshAll" :loading="refreshing">
-            刷新
-          </el-button>
-        </div>
+      </div>
+      <div class="status-strip__actions">
+        <el-tag :type="runState.type" effect="light" round class="status-tag">
+          <i class="dot" :class="runState.dot"></i>
+          {{ runState.text }}
+        </el-tag>
+        <el-button :icon="Refresh" @click="refreshAll" :loading="refreshing">刷新</el-button>
       </div>
     </section>
 
     <!-- 状态卡片 -->
     <el-row :gutter="20" class="stat-row">
-      <el-col :xs="12" :sm="12" :md="6">
+      <el-col :xs="12" :sm="12" :md="12" :lg="6">
         <div class="stat-card">
           <div class="stat-icon browser"><el-icon><Monitor /></el-icon></div>
           <div class="stat-body">
@@ -38,20 +38,26 @@
         </div>
       </el-col>
 
-      <el-col :xs="12" :sm="12" :md="6">
+      <el-col :xs="12" :sm="12" :md="12" :lg="6">
         <div class="stat-card">
           <div class="stat-icon login"><el-icon><Key /></el-icon></div>
           <div class="stat-body">
             <span class="stat-label">登录状态</span>
             <span class="stat-value">
-              <i class="dot" :class="loginStatus ? 'online' : 'offline'"></i>
+              <el-avatar
+                v-if="loginStatus && douyinAvatar"
+                :size="22"
+                :src="douyinAvatar"
+                class="login-avatar"
+              />
+              <i v-else class="dot" :class="loginStatus ? 'online' : 'offline'"></i>
               {{ loginStatus ? '已登录' : '未登录' }}
             </span>
           </div>
         </div>
       </el-col>
 
-      <el-col :xs="12" :sm="12" :md="6">
+      <el-col :xs="12" :sm="12" :md="12" :lg="6">
         <div class="stat-card">
           <div class="stat-icon friends"><el-icon><User /></el-icon></div>
           <div class="stat-body">
@@ -61,7 +67,7 @@
         </div>
       </el-col>
 
-      <el-col :xs="12" :sm="12" :md="6">
+      <el-col :xs="12" :sm="12" :md="12" :lg="6">
         <div class="stat-card">
           <div class="stat-icon tasks"><el-icon><Clock /></el-icon></div>
           <div class="stat-body">
@@ -74,7 +80,7 @@
 
     <!-- 快速操作 + 系统信息 -->
     <el-row :gutter="20" class="main-row">
-      <el-col :xs="24" :lg="14">
+      <el-col :xs="24" :lg="13">
         <div class="panel">
           <div class="panel-header">
             <span class="panel-title"><el-icon><Operation /></el-icon>快速操作</span>
@@ -111,6 +117,21 @@
             </div>
             <div
               class="action-item"
+              :class="{ loading: reinitLoading }"
+              tabindex="0"
+              role="button"
+              @click="reInitBrowser"
+              @keydown.enter="onActionKeydown"
+              @keydown.space.prevent="onActionKeydown"
+            >
+              <div class="action-icon reinit"><el-icon><RefreshRight /></el-icon></div>
+              <div class="action-text">
+                <span class="action-name">重新初始化浏览器</span>
+                <span class="action-hint">卡死/异常时重建</span>
+              </div>
+            </div>
+            <div
+              class="action-item"
               tabindex="0"
               role="button"
               @click="router.push('/tasks')"
@@ -123,25 +144,11 @@
                 <span class="action-hint">添加或修改任务</span>
               </div>
             </div>
-            <div
-              class="action-item"
-              tabindex="0"
-              role="button"
-              @click="router.push('/settings')"
-              @keydown.enter="onActionKeydown"
-              @keydown.space.prevent="onActionKeydown"
-            >
-              <div class="action-icon settings"><el-icon><Setting /></el-icon></div>
-              <div class="action-text">
-                <span class="action-name">系统设置</span>
-                <span class="action-hint">配置账户信息</span>
-              </div>
-            </div>
           </div>
         </div>
       </el-col>
 
-      <el-col :xs="24" :lg="10">
+      <el-col :xs="24" :lg="11">
         <div class="panel">
           <div class="panel-header">
             <span class="panel-title"><el-icon><InfoFilled /></el-icon>系统信息</span>
@@ -172,13 +179,16 @@
               </span>
             </div>
             <div class="info-item">
+              <span class="info-label">调度器</span>
+              <span class="info-value">
+                <i class="dot" :class="schedulerStatus ? 'online' : 'offline'"></i>
+                {{ schedulerStatus ? '运行中' : '未运行' }}
+              </span>
+            </div>
+            <div class="info-item">
               <span class="info-label">运行状态</span>
-              <el-tag
-                :type="browserStatus && loginStatus ? 'success' : 'warning'"
-                size="small"
-                effect="light"
-              >
-                {{ browserStatus && loginStatus ? '正常' : '待初始化' }}
+              <el-tag :type="runState.type" size="small" effect="light">
+                {{ runState.text }}
               </el-tag>
             </div>
           </div>
@@ -205,7 +215,9 @@
         <el-table-column label="好友" min-width="140">
           <template #default="{ row }">
             <div class="friend-cell">
-              <span class="friend-avatar">{{ row.name?.charAt(0) || '?' }}</span>
+              <el-avatar :size="32" :src="avatarOf(row.name)" class="friend-avatar-img">
+                {{ row.name?.charAt(0) || '?' }}
+              </el-avatar>
               <span>{{ row.name }}</span>
             </div>
           </template>
@@ -229,24 +241,25 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Refresh,
+  RefreshRight,
   Monitor,
   Clock,
   Key,
   User,
   Operation,
-  Setting,
   InfoFilled,
   Calendar,
   ArrowRight,
   TopRight
 } from '@element-plus/icons-vue'
-import { initBrowser as initBrowserApi, getInitStatus, getLoginStatus, getFriendsList, getTaskList, getHome } from '../api/douyin'
-import { browserStatus, loginStatus, setBrowserStatus, setLoginStatus, setFriendsList } from '../stores/browser'
+import { initBrowser as initBrowserApi, reInitBrowser as reInitBrowserApi, getFriendsList, getTaskList, getHome, getStatus, getUserInfo } from '../api/douyin'
+import { browserStatus, loginStatus, friendsList, douyinAvatar, douyinNickname, setBrowserStatus, setLoginStatus, setFriendsList, setDouyinUser } from '../stores/browser'
+import FlameIcon from '../components/FlameIcon.vue'
 import { formatFriendsList } from '../utils/format'
 import { APP_VERSION, API_HOST, FRONTEND_PORT } from '../config'
 
@@ -261,8 +274,33 @@ const friendsCount = ref(0)
 const taskCount = ref(0)
 const recentTasks = ref([])
 const initLoading = ref(false)
+const reinitLoading = ref(false)
 const uptime = ref('--')
 const refreshing = ref(false)
+
+// 运行状态三态：未初始化 / 已初始化但未登录 / 运行正常
+// 避免"浏览器已初始化但没登录"被横幅和系统信息笼统显示成"待初始化"（与状态卡片不一致）
+const runState = computed(() => {
+  if (browserStatus.value && loginStatus.value) {
+    return { text: '系统运行正常', type: 'success', dot: 'online' }
+  }
+  if (browserStatus.value) {
+    return { text: '待登录抖音', type: 'warning', dot: 'pending' }
+  }
+  return { text: '待初始化', type: 'info', dot: 'offline' }
+})
+
+// 好友名 → 抖音头像 映射：首页定时任务栏据此显示真实头像（取不到时回退首字头像）
+const schedulerStatus = ref(false)
+
+const avatarMap = computed(() => {
+  const m = {}
+  for (const f of friendsList.value) {
+    if (f && f.name) m[f.name] = f.avatar || ''
+  }
+  return m
+})
+const avatarOf = (name) => avatarMap.value[name] || ''
 
 // noVNC 网页版地址（用当前访问的域名/IP 拼 6080 端口，便于一键打开 VNC 二次验证）
 const vncUrl = `http://${window.location.hostname}:6080/`
@@ -304,25 +342,36 @@ const formatUptime = (startTime) => {
   return parts.join(' ')
 }
 
-const checkBrowserStatus = async () => {
+// 综合状态检测：浏览器是否可用、抖音是否已登录、调度器是否运行（后端实际校验）
+const checkStatus = async () => {
   try {
-    const res = await getInitStatus()
-    browserStatus.value = res.data === 'Yes'
+    const res = await getStatus()
+    const d = res.data || {}
+    browserStatus.value = d.browser === 'Yes'
     setBrowserStatus(browserStatus.value)
+    loginStatus.value = d.login === 'Yes'
+    setLoginStatus(loginStatus.value)
+    schedulerStatus.value = d.scheduler === 'Yes'
+    taskCount.value = d.task_count ?? taskCount.value
+    if (loginStatus.value && !douyinAvatar.value) {
+      loadDouyinUser()
+    }
   } catch (error) {
     browserStatus.value = false
+    loginStatus.value = false
+    schedulerStatus.value = false
     setBrowserStatus(false)
+    setLoginStatus(false)
   }
 }
 
-const checkLoginStatus = async () => {
+const loadDouyinUser = async () => {
   try {
-    const res = await getLoginStatus()
-    loginStatus.value = res.data === 'Yes'
-    setLoginStatus(loginStatus.value)
-  } catch (error) {
-    loginStatus.value = false
-    setLoginStatus(false)
+    const res = await getUserInfo()
+    const d = res.data || {}
+    setDouyinUser(d.nickname, d.avatar)
+  } catch (e) {
+    // 错误已由响应拦截器统一提示
   }
 }
 
@@ -356,8 +405,12 @@ const initBrowser = async () => {
     if (res.code === 200) {
       browserStatus.value = true
       setBrowserStatus(true)
-      ElMessage.success('浏览器初始化成功')
-      await checkLoginStatus()
+      if (res.data === 'init Repeated!') {
+        ElMessage.info('浏览器已在运行中，无需重复初始化')
+      } else {
+        ElMessage.success('浏览器初始化成功')
+      }
+      await checkStatus()
       if (!loginStatus.value) {
         ElMessageBox.confirm('浏览器初始化成功，但您还未登录抖音账号，是否前往登录？', '提示', {
           confirmButtonText: '前往登录',
@@ -375,15 +428,54 @@ const initBrowser = async () => {
   }
 }
 
+// 重新初始化浏览器：关闭当前会话并重建（登录状态可能失效，先确认）
+const reInitBrowser = async () => {
+  try {
+    await ElMessageBox.confirm(
+      '将关闭当前浏览器会话并重新启动（约需 10~30 秒）。未开启「保存登录数据」时抖音登录状态会失效，需要重新登录，是否继续？',
+      '重新初始化浏览器',
+      {
+        confirmButtonText: '确定重新初始化',
+        cancelButtonText: '取消',
+        type: 'warning'
+      }
+    )
+  } catch (e) {
+    return
+  }
+
+  reinitLoading.value = true
+  try {
+    const res = await reInitBrowserApi()
+    if (res.code === 200) {
+      ElMessage.success('浏览器已重新初始化')
+      await checkStatus()
+      if (!loginStatus.value) {
+        ElMessageBox.confirm('浏览器已重启，请重新登录抖音账号，是否现在前往登录？', '提示', {
+          confirmButtonText: '前往登录',
+          cancelButtonText: '稍后',
+          type: 'warning'
+        }).then(() => {
+          router.push('/settings')
+        }).catch(() => {})
+      }
+    }
+  } catch (error) {
+    // 错误提示已由响应拦截器统一处理
+  } finally {
+    reinitLoading.value = false
+  }
+}
+
 // 手动刷新全部数据
 const refreshAll = async () => {
   refreshing.value = true
   try {
-    await checkBrowserStatus()
-    await checkLoginStatus()
+    await checkStatus()
+    // 定时任务是本地持久化数据，未登录/未初始化时也要展示，否则卡片会一直是 0
+    await loadTaskList()
     if (browserStatus.value && loginStatus.value) {
       await refreshFriends()
-      await loadTaskList()
     }
   } finally {
     refreshing.value = false
@@ -423,137 +515,144 @@ onUnmounted(() => {
 
 <style scoped>
 .page {
-  max-width: 1280px;
+  max-width: 1400px;
   margin: 0 auto;
+  width: 100%;
 }
 
-/* 首屏内容级联入场 */
-.page > * {
-  animation: fadeInUp 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-.page > *:nth-child(1) {
-  animation-delay: 0.02s;
-}
-.page > *:nth-child(2) {
-  animation-delay: 0.08s;
-}
-.page > *:nth-child(3) {
-  animation-delay: 0.14s;
-}
-.page > *:nth-child(4) {
-  animation-delay: 0.2s;
-}
-
-/* ---------- 欢迎横幅 ---------- */
-.hero {
-  position: relative;
-  border-radius: var(--radius-xl);
-  padding: 30px 34px;
-  overflow: hidden;
-  background: var(--gradient);
-  background-size: 200% 200%;
-  animation: gradientShift 9s ease-in-out infinite;
-  box-shadow: 0 14px 34px rgba(255, 90, 47, 0.28);
-}
-
-.hero::after {
-  content: '';
-  position: absolute;
-  right: -60px;
-  top: -80px;
-  width: 240px;
-  height: 240px;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.14);
-}
-
-.hero-inner {
-  position: relative;
-  z-index: 1;
+/* ---------- 账号状态条 ---------- */
+.status-strip {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
   flex-wrap: wrap;
+  padding: 14px 18px;
+  background: var(--surface);
+  background-image: var(--bg-accent);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
 }
 
-.hero-title {
-  font-size: 24px;
-  font-weight: 700;
-  color: #fff;
-  letter-spacing: -0.01em;
-}
-
-.hero-subtitle {
-  margin-top: 6px;
-  font-size: 14px;
-  color: rgba(255, 255, 255, 0.9);
-}
-
-.hero-actions {
+.status-strip__main {
   display: flex;
   align-items: center;
   gap: 12px;
+  min-width: 0;
+}
+
+.brand-mark {
+  width: 38px;
+  height: 38px;
+  flex: none;
+  border-radius: var(--radius-md);
+  display: grid;
+  place-items: center;
+  font-size: 19px;
+  color: #fff;
+  background: var(--gradient);
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--primary) 28%, transparent);
+}
+
+.status-strip__text {
+  min-width: 0;
+}
+
+.status-strip__title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-1);
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.status-strip__sub {
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.status-strip__sub b {
+  color: var(--text-2);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.status-strip__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   flex-wrap: wrap;
 }
 
-.hero-actions .el-button {
-  background: rgba(255, 255, 255, 0.9);
-  border-color: rgba(255, 255, 255, 0.9);
-  color: var(--primary);
-  font-weight: 600;
+.status-tag {
+  display: inline-flex;
+  align-items: center;
+  border-color: transparent;
+  font-weight: 500;
 }
 
-.hero-actions .el-button:hover {
-  background: #fff;
-  color: var(--primary-strong);
+.status-tag .dot {
+  margin-right: 6px;
 }
 
-.hero-tag {
-  border-color: rgba(255, 255, 255, 0.6);
-  color: #fff;
-  background: rgba(255, 255, 255, 0.18);
-}
-
-/* ---------- 状态卡片 ---------- */
+/* ---------- 指标卡片 ---------- */
 .stat-row {
-  row-gap: 20px;
+  row-gap: 14px;
 }
 
 .stat-card {
+  position: relative;
+  overflow: hidden;
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 20px;
+  gap: 12px;
+  padding: 15px 16px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-sm);
-  transition: transform 0.2s ease, box-shadow 0.2s ease, background-color 0.3s ease,
-    border-color 0.3s ease;
   height: 100%;
+  transition: transform var(--dur) ease, box-shadow var(--dur) ease,
+    border-color var(--dur) ease, background-color 0.28s ease;
+}
+
+.stat-card::after {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 2px;
+  background: linear-gradient(90deg, var(--primary), transparent);
+  opacity: 0.75;
 }
 
 .stat-card:hover {
-  transform: translateY(-2px);
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--primary) 40%, var(--border));
   box-shadow: var(--shadow-md);
 }
 
 .stat-icon {
-  width: 48px;
-  height: 48px;
-  border-radius: 12px;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-md);
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  font-size: 22px;
+  font-size: 17px;
 }
 
-.stat-icon.browser { background: var(--primary-soft); color: var(--primary); }
-.stat-icon.login { background: var(--info-bg); color: var(--info); }
-.stat-icon.friends { background: var(--success-bg); color: var(--success); }
-.stat-icon.tasks { background: var(--warning-bg); color: var(--warning); }
+.stat-icon.browser { color: var(--primary); background: color-mix(in srgb, var(--primary) 12%, transparent); }
+.stat-icon.login { color: var(--info); background: color-mix(in srgb, var(--info) 12%, transparent); }
+.stat-icon.friends { color: var(--success); background: color-mix(in srgb, var(--success) 12%, transparent); }
+.stat-icon.tasks { color: var(--warning); background: color-mix(in srgb, var(--warning) 12%, transparent); }
 
 .stat-body {
   display: flex;
@@ -562,46 +661,38 @@ onUnmounted(() => {
 }
 
 .stat-label {
-  font-size: 13px;
+  font-size: 12px;
   color: var(--text-3);
-  margin-bottom: 2px;
+  margin-bottom: 1px;
 }
 
 .stat-value {
-  font-size: 17px;
+  font-size: 15px;
   font-weight: 600;
   color: var(--text-1);
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 .stat-value.number {
-  font-size: 22px;
+  font-size: 20px;
   font-weight: 700;
+  letter-spacing: -0.01em;
 }
 
 .stat-value.number em {
   font-style: normal;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 400;
   color: var(--text-3);
 }
 
-.dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
-.dot.online { background: var(--success); box-shadow: 0 0 0 3px rgba(22,163,74,.15); }
-.dot.offline { background: var(--danger); box-shadow: 0 0 0 3px rgba(239,68,68,.15); }
-
 /* ---------- 面板 ---------- */
 .main-row {
-  row-gap: 20px;
+  row-gap: 14px;
 }
 
 .panel {
@@ -609,96 +700,93 @@ onUnmounted(() => {
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-sm);
-  padding: 22px;
+  padding: 18px;
   height: 100%;
-  transition: transform 0.25s ease, box-shadow 0.25s ease, background-color 0.3s ease,
-    border-color 0.3s ease;
-}
-
-.panel:hover {
-  transform: translateY(-2px);
-  box-shadow: var(--shadow-md);
+  transition: box-shadow var(--dur) ease, background-color 0.28s ease,
+    border-color 0.28s ease;
 }
 
 .panel + .panel {
-  margin-top: 20px;
+  margin-top: 14px;
 }
 
 .panel-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 18px;
+  gap: 12px;
+  margin-bottom: 14px;
 }
 
 .panel-title {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 16px;
+  gap: 7px;
+  font-size: 14.5px;
   font-weight: 600;
   color: var(--text-1);
 }
 
 .panel-title .el-icon {
   color: var(--primary);
-  font-size: 18px;
+  font-size: 16px;
 }
 
 /* ---------- 快速操作 ---------- */
 .action-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
-  gap: 14px;
+  gap: 12px;
 }
 
 .action-item {
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 18px 16px;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  gap: 12px;
+  padding: 14px;
+  background: var(--surface);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-lg);
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: border-color var(--dur) ease, background var(--dur) ease,
+    transform var(--dur) ease;
 }
 
 .action-item:hover {
-  border-color: var(--primary);
-  background: var(--primary-soft);
+  border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
+  background: color-mix(in srgb, var(--primary) 4%, var(--surface));
   transform: translateY(-1px);
 }
 
 .action-item.loading {
-  opacity: 0.65;
+  opacity: 0.6;
   pointer-events: none;
 }
 
 .action-icon {
-  width: 44px;
-  height: 44px;
-  border-radius: 11px;
+  width: 38px;
+  height: 38px;
+  border-radius: var(--radius-md);
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  font-size: 20px;
-  color: #fff;
+  font-size: 18px;
 }
 
-.action-icon.browser { background: linear-gradient(135deg, #ff8a3d, #ff4d5e); }
-.action-icon.refresh { background: linear-gradient(135deg, #3b82f6, #6366f1); }
-.action-icon.tasks { background: linear-gradient(135deg, #16a34a, #22c55e); }
-.action-icon.settings { background: linear-gradient(135deg, #f59e0b, #f97316); }
+.action-icon.browser { color: var(--primary); background: color-mix(in srgb, var(--primary) 12%, transparent); }
+.action-icon.refresh { color: var(--info); background: color-mix(in srgb, var(--info) 12%, transparent); }
+.action-icon.reinit { color: var(--slate); background: color-mix(in srgb, var(--slate) 14%, transparent); }
+.action-icon.tasks { color: var(--success); background: color-mix(in srgb, var(--success) 12%, transparent); }
 
 .action-text {
   display: flex;
   flex-direction: column;
+  min-width: 0;
 }
 
 .action-name {
-  font-size: 14px;
+  font-size: 13.5px;
   font-weight: 600;
   color: var(--text-1);
 }
@@ -712,31 +800,38 @@ onUnmounted(() => {
 .info-list {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 6px;
 }
 
 .info-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 11px 14px;
-  background: var(--surface-2);
+  gap: 12px;
+  padding: 8px 12px;
+  background: var(--surface-muted);
   border-radius: var(--radius-md);
 }
 
 .info-label {
-  font-size: 13px;
+  font-size: 12.5px;
   color: var(--text-3);
+  white-space: nowrap;
 }
 
 .info-value {
-  font-size: 13px;
+  font-size: 12.5px;
   font-weight: 500;
   color: var(--text-1);
-  max-width: 55%;
+  max-width: 62%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.login-avatar {
+  flex-shrink: 0;
+  border: 1px solid var(--border);
 }
 
 .info-value.uptime {
@@ -749,37 +844,34 @@ onUnmounted(() => {
   align-items: center;
   gap: 3px;
   color: var(--info);
-  font-size: 13px;
+  font-size: 12.5px;
   font-weight: 500;
   white-space: nowrap;
 }
+
 .info-item .vnc-link:hover {
   text-decoration: underline;
 }
 
 /* ---------- 最近任务 ---------- */
 .task-table {
-  margin-top: 4px;
+  margin-top: 2px;
 }
 
 .friend-cell {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 9px;
 }
 
-.friend-avatar {
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
+.friend-avatar-img {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
   background: var(--gradient);
   color: #fff;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   font-weight: 600;
-  font-size: 13px;
-  flex-shrink: 0;
+  font-size: 12px;
 }
 
 .next-run {
@@ -787,7 +879,8 @@ onUnmounted(() => {
   align-items: center;
   gap: 6px;
   color: var(--text-2);
-  font-size: 13px;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
 }
 
 .next-run .el-icon {
@@ -796,12 +889,8 @@ onUnmounted(() => {
 
 /* ---------- 响应式 ---------- */
 @media (max-width: 768px) {
-  .hero {
-    padding: 24px 22px;
-  }
-
-  .hero-title {
-    font-size: 20px;
+  .status-strip {
+    padding: 12px 14px;
   }
 
   .action-grid {
@@ -810,7 +899,7 @@ onUnmounted(() => {
   }
 
   .panel {
-    padding: 18px;
+    padding: 15px;
   }
 }
 

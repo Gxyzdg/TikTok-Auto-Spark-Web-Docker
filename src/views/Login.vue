@@ -1,11 +1,5 @@
 <template>
   <div class="login-container">
-    <div class="login-bg">
-      <div class="blob blob-1"></div>
-      <div class="blob blob-2"></div>
-      <div class="blob blob-3"></div>
-    </div>
-
     <div class="login-card">
       <div class="login-brand">
         <div class="brand-logo"><FlameIcon /></div>
@@ -113,131 +107,91 @@ const handleLogin = async () => {
 .login-container {
   position: relative;
   min-height: 100vh;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  display: grid;
+  place-items: center;
   padding: 24px;
-  overflow: hidden;
-  background: linear-gradient(140deg, #ff9a4d 0%, #ff5a2f 48%, #d92d5a 100%);
-}
-
-.login-bg {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-}
-
-.blob {
-  position: absolute;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.12);
-  filter: blur(2px);
-}
-
-.blob-1 {
-  width: 420px;
-  height: 420px;
-  top: -120px;
-  right: -80px;
-  animation: floatY 7s ease-in-out infinite;
-}
-
-.blob-2 {
-  width: 300px;
-  height: 300px;
-  bottom: -100px;
-  left: -60px;
-  background: rgba(255, 255, 255, 0.08);
-  animation: floatY 9s ease-in-out infinite reverse;
-}
-
-.blob-3 {
-  width: 180px;
-  height: 180px;
-  top: 18%;
-  left: 12%;
-  background: rgba(255, 255, 255, 0.1);
-  animation: floatY 8s ease-in-out infinite;
+  background: var(--bg);
+  background-image: var(--bg-accent);
+  background-attachment: fixed;
+  background-repeat: no-repeat;
 }
 
 .login-card {
   position: relative;
   z-index: 1;
   width: 100%;
-  max-width: 400px;
-  padding: 42px 36px 28px;
-  background: #fff;
-  border-radius: 20px;
-  box-shadow: 0 24px 60px rgba(120, 20, 30, 0.28);
-  animation: fadeInUp 0.6s cubic-bezier(0.22, 1, 0.36, 1) both;
+  max-width: 380px;
+  padding: 32px 30px 22px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-md);
+  animation: fadeInUp 0.32s var(--ease) both;
 }
 
 .login-brand {
   text-align: center;
-  margin-bottom: 30px;
+  margin-bottom: 24px;
 }
 
 .brand-logo {
-  width: 60px;
-  height: 60px;
-  margin: 0 auto 14px;
+  width: 48px;
+  height: 48px;
+  margin: 0 auto 12px;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 30px;
+  font-size: 24px;
   color: #fff;
-  border-radius: 16px;
-  background: linear-gradient(135deg, #ff8a3d 0%, #ff4d5e 100%);
-  box-shadow: 0 10px 22px rgba(255, 90, 47, 0.35);
-  animation: floatY 3.5s ease-in-out infinite;
+  border-radius: var(--radius-lg);
+  background: var(--gradient);
+  box-shadow: 0 6px 16px color-mix(in srgb, var(--primary) 28%, transparent);
 }
 
 .brand-title {
-  font-size: 22px;
-  font-weight: 700;
-  color: #1a1d24;
-  letter-spacing: -0.01em;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-1);
+  letter-spacing: -0.005em;
 }
 
 .brand-sub {
-  margin-top: 6px;
-  font-size: 13px;
-  color: #9aa1ad;
+  margin-top: 4px;
+  font-size: 12.5px;
+  color: var(--text-3);
 }
 
 .login-form :deep(.el-input__wrapper) {
-  border-radius: 10px;
-  background: #f6f7f9;
+  border-radius: var(--radius-md);
+  background: var(--surface-muted);
   box-shadow: none;
-  padding: 4px 14px;
+  padding: 3px 12px;
+  transition: background-color var(--dur) ease, box-shadow var(--dur) ease;
 }
 
 .login-form :deep(.el-input__wrapper.is-focus) {
-  background: #fff;
+  background: var(--surface);
   box-shadow: 0 0 0 1px var(--primary) inset;
 }
 
 .login-form :deep(.el-input__inner) {
-  font-size: 15px;
-  color: #1a1d24;
+  font-size: 14px;
+  color: var(--text-1);
 }
 
 .login-button {
   width: 100%;
-  height: 46px;
-  margin-top: 6px;
-  font-size: 15px;
+  height: 42px;
+  margin-top: 4px;
+  font-size: 14.5px;
   font-weight: 600;
-  border: none;
-  border-radius: 10px;
-  background: linear-gradient(135deg, #ff8a3d 0%, #ff4d5e 100%);
-  box-shadow: 0 10px 22px rgba(255, 90, 47, 0.32);
-  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  border-radius: var(--radius-md);
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--primary) 24%, transparent);
 }
 
 .login-button:hover {
   transform: translateY(-1px);
-  box-shadow: 0 14px 26px rgba(255, 90, 47, 0.4);
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--primary) 32%, transparent);
 }
 
 .login-button:active {
@@ -245,15 +199,15 @@ const handleLogin = async () => {
 }
 
 .login-footer {
-  margin-top: 22px;
+  margin-top: 18px;
   text-align: center;
-  font-size: 12px;
-  color: #c0c5cd;
+  font-size: 11.5px;
+  color: var(--text-faint);
 }
 
 @media (max-width: 480px) {
   .login-card {
-    padding: 34px 26px 24px;
+    padding: 26px 22px 18px;
   }
 }
 </style>

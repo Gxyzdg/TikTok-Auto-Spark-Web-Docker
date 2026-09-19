@@ -45,6 +45,14 @@
           </template>
         </el-menu-item>
       </el-menu>
+
+      <div v-if="!isCollapsed || isMobile" class="sidebar-footer">
+        <a class="sidebar-footer__link" :href="vncUrl" target="_blank" rel="noopener">
+          <el-icon><Monitor /></el-icon>
+          <span>noVNC 远程桌面</span>
+        </a>
+        <span class="sidebar-footer__ver mono">{{ APP_VERSION }}</span>
+      </div>
     </aside>
 
     <!-- 主体 -->
@@ -63,12 +71,10 @@
             <Fold v-if="!isCollapsed || isMobile" />
             <Expand v-else />
           </el-icon>
-          <el-breadcrumb separator="/">
-            <el-breadcrumb-item :to="{ path: '/home' }">首页</el-breadcrumb-item>
-            <el-breadcrumb-item v-if="activeMenu !== '/home'">
-              {{ currentMenuTitle }}
-            </el-breadcrumb-item>
-          </el-breadcrumb>
+          <div class="header-titles">
+            <h1 class="header-title">{{ currentMenuTitle }}</h1>
+            <p class="header-sub">{{ currentMenuSubtitle }}</p>
+          </div>
         </div>
 
         <div class="header-right">
@@ -88,7 +94,7 @@
           </el-tooltip>
           <el-dropdown trigger="click" @command="handleCommand">
             <span class="user-info" tabindex="0" aria-label="用户菜单">
-              <el-avatar :size="32" :icon="UserFilled" />
+              <el-avatar :size="32" :src="douyinAvatar" :icon="UserFilled" class="douyin-avatar" />
               <span class="username">{{ userStore.userInfo.username || 'Admin' }}</span>
               <el-icon><ArrowDown /></el-icon>
             </span>
@@ -120,9 +126,10 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
 import { useUserStore } from '../stores/user'
-import { logout, getInitStatus, getLoginStatus } from '../api/douyin'
-import { browserStatus, setBrowserStatus, setLoginStatus } from '../stores/browser'
+import { logout, getInitStatus, getLoginStatus, getUserInfo } from '../api/douyin'
+import { browserStatus, loginStatus, setBrowserStatus, setLoginStatus, douyinAvatar, setDouyinUser } from '../stores/browser'
 import FlameIcon from '../components/FlameIcon.vue'
+import { APP_VERSION } from '../config'
 import {
   Fold,
   Expand,
@@ -133,9 +140,12 @@ import {
   User,
   Clock,
   Setting,
+  Monitor,
   Moon,
   Sunny
 } from '@element-plus/icons-vue'
+
+const vncUrl = `http://${window.location.hostname}:6080/`
 
 const router = useRouter()
 const route = useRoute()
@@ -191,6 +201,10 @@ const pollStatus = async () => {
   } catch (e) {
     setLoginStatus(false)
   }
+  // 已登录且尚无头像缓存时，拉取抖音账号头像
+  if (loginStatus.value && !douyinAvatar.value) {
+    await loadDouyinUser()
+  }
 }
 
 onMounted(() => {
@@ -209,18 +223,35 @@ onUnmounted(() => {
 })
 
 const menuList = [
-  { path: '/home', title: '首页', icon: House },
-  { path: '/friends', title: '好友列表', icon: User },
-  { path: '/tasks', title: '定时任务', icon: Clock },
-  { path: '/settings', title: '设置', icon: Setting }
+  { path: '/home', title: '概览', sub: '运行状态与快捷操作', icon: House },
+  { path: '/friends', title: '好友列表', sub: '好友数据与火花状态', icon: User },
+  { path: '/tasks', title: '定时任务', sub: '每日自动发送任务', icon: Clock },
+  { path: '/settings', title: '设置', sub: '账号登录与系统配置', icon: Setting }
 ]
 
 const activeMenu = computed(() => route.path)
 
 const currentMenuTitle = computed(() => {
   const menu = menuList.find(item => item.path === activeMenu.value)
-  return menu ? menu.title : ''
+  return menu ? menu.title : '概览'
 })
+
+const currentMenuSubtitle = computed(() => {
+  const menu = menuList.find(item => item.path === activeMenu.value)
+  return menu ? menu.sub : ''
+})
+
+// 登录状态下拉取抖音账号头像（右上角显示真实头像）
+const loadDouyinUser = async () => {
+  if (!loginStatus.value) return
+  try {
+    const res = await getUserInfo()
+    const d = res.data || {}
+    setDouyinUser(d.nickname, d.avatar)
+  } catch (e) {
+    // 错误已由响应拦截器统一提示
+  }
+}
 
 const handleMenuSelect = (path) => {
   router.push(path)
@@ -255,20 +286,20 @@ const handleCommand = (command) => {
 .overlay {
   position: fixed;
   inset: 0;
-  background: rgba(17, 24, 39, 0.45);
+  background: rgba(15, 29, 51, 0.42);
   z-index: 25;
 }
 
 /* ---------- 侧边栏 ---------- */
 .sidebar {
-  width: 240px;
+  width: 232px;
   flex-shrink: 0;
   background: var(--surface);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  transition: width 0.25s ease, transform 0.25s ease, background-color 0.3s ease,
-    border-color 0.3s ease;
+  transition: width 0.22s ease, transform 0.22s ease, background-color 0.28s ease,
+    border-color 0.28s ease;
   position: relative;
   z-index: 30;
 }
@@ -282,7 +313,7 @@ const handleCommand = (command) => {
   top: 0;
   left: 0;
   bottom: 0;
-  width: 240px;
+  width: 232px;
   transform: translateX(-100%);
   box-shadow: var(--shadow-lg);
 }
@@ -292,40 +323,41 @@ const handleCommand = (command) => {
 }
 
 .logo {
-  height: 64px;
+  height: 60px;
   display: flex;
   align-items: center;
   gap: 10px;
   padding: 0 16px;
   border-bottom: 1px solid var(--border);
   position: relative;
+  flex-shrink: 0;
 }
 
 .logo-mark {
-  width: 34px;
-  height: 34px;
-  border-radius: 10px;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-md);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 18px;
+  font-size: 17px;
   color: #fff;
   background: var(--gradient);
-  box-shadow: 0 6px 14px rgba(255, 90, 47, 0.3);
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--primary) 30%, transparent);
   flex-shrink: 0;
 }
 
 .logo-text {
-  font-size: 16px;
-  font-weight: 700;
+  font-size: 14.5px;
+  font-weight: 600;
   color: var(--text-1);
   white-space: nowrap;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.005em;
 }
 
 .status-dot {
-  width: 9px;
-  height: 9px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   margin-left: auto;
   flex-shrink: 0;
@@ -333,16 +365,16 @@ const handleCommand = (command) => {
 
 .status-dot.online {
   background: var(--success);
-  box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.15);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 16%, transparent);
 }
 
 .status-dot.offline {
   background: var(--danger);
-  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.15);
-  animation: pulse 2s infinite;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 16%, transparent);
+  animation: softPulse 2s infinite;
 }
 
-@keyframes pulse {
+@keyframes softPulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.45; }
 }
@@ -358,23 +390,23 @@ const handleCommand = (command) => {
 
 .sidebar.is-collapsed .status-dot {
   position: absolute;
-  top: 15px;
-  right: 15px;
-  width: 8px;
-  height: 8px;
+  top: 14px;
+  right: 14px;
+  width: 7px;
+  height: 7px;
   margin: 0;
 }
 
 .menu {
   border-right: none;
   flex: 1;
-  padding: 14px 12px;
+  padding: 10px 10px;
   background: transparent;
   overflow-y: auto;
 }
 
 .sidebar.is-collapsed .menu {
-  padding: 14px 0;
+  padding: 10px 6px;
 }
 
 .menu:not(.el-menu--collapse) {
@@ -382,35 +414,60 @@ const handleCommand = (command) => {
 }
 
 .menu :deep(.el-menu-item) {
-  height: 44px;
-  line-height: 44px;
-  margin-bottom: 4px;
-  border-radius: 10px;
+  height: 40px;
+  line-height: 40px;
+  margin-bottom: 2px;
+  border-radius: var(--radius-md);
   color: var(--text-2);
+  font-size: 13.5px;
   font-weight: 500;
-  transition: background-color 0.2s ease, color 0.2s ease;
+  transition: background-color var(--dur) ease, color var(--dur) ease;
 }
 
 .menu :deep(.el-menu-item:hover) {
-  background: var(--surface-2);
+  background: var(--surface-muted);
   color: var(--text-1);
 }
 
 .menu :deep(.el-menu-item.is-active) {
-  background: var(--primary-soft);
+  background: color-mix(in srgb, var(--primary) 10%, var(--surface));
   color: var(--primary);
   font-weight: 600;
 }
 
-/* 菜单图标微动效：hover 轻微放大，提升操作流畅感 */
 .menu :deep(.el-menu-item .el-icon) {
-  transition: transform 0.2s ease;
+  font-size: 17px;
+  transition: color var(--dur) ease;
 }
-.menu :deep(.el-menu-item:hover .el-icon) {
-  transform: scale(1.12);
+
+/* 侧栏底部信息区 */
+.sidebar-footer {
+  margin-top: auto;
+  padding: 10px 12px 12px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
-.menu :deep(.el-menu-item.is-active .el-icon) {
-  transform: scale(1.08);
+
+.sidebar-footer__link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--text-2);
+  transition: color var(--dur) ease;
+}
+
+.sidebar-footer__link:hover {
+  color: var(--primary);
+}
+
+.sidebar-footer__ver {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  white-space: nowrap;
 }
 
 /* ---------- 主体 ---------- */
@@ -423,49 +480,86 @@ const handleCommand = (command) => {
 }
 
 .header {
-  height: 60px;
+  min-height: 60px;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 22px;
+  gap: 12px;
+  padding: 8px 20px;
   flex-shrink: 0;
-  transition: background-color 0.3s ease, border-color 0.3s ease;
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  transition: background-color 0.28s ease, border-color 0.28s ease;
 }
 
 .header-left {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 12px;
+  min-width: 0;
+}
+
+.header-titles {
+  min-width: 0;
+}
+
+.header-title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--text-1);
+  letter-spacing: -0.005em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.header-sub {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .collapse-btn {
-  font-size: 20px;
+  font-size: 18px;
   cursor: pointer;
   color: var(--text-2);
-  transition: color 0.2s ease;
+  padding: 4px;
+  border-radius: var(--radius-sm);
+  transition: color var(--dur) ease, background-color var(--dur) ease;
 }
 
 .collapse-btn:hover {
   color: var(--primary);
+  background: var(--surface-muted);
 }
 
 .header-right {
   display: flex;
   align-items: center;
+  gap: 6px;
 }
 
 .theme-toggle {
-  font-size: 18px;
+  font-size: 17px;
   color: var(--text-2);
   cursor: pointer;
-  margin-right: 14px;
-  transition: color 0.2s ease;
+  padding: 6px;
+  border-radius: var(--radius-sm);
+  transition: color var(--dur) ease, background-color var(--dur) ease;
 }
 
 .theme-toggle:hover {
   color: var(--primary);
+  background: var(--surface-muted);
 }
 
 .user-info {
@@ -473,17 +567,17 @@ const handleCommand = (command) => {
   align-items: center;
   gap: 8px;
   cursor: pointer;
-  padding: 6px 8px;
-  border-radius: 8px;
-  transition: background-color 0.2s ease;
+  padding: 5px 8px 5px 6px;
+  border-radius: var(--radius-md);
+  transition: background-color var(--dur) ease;
 }
 
 .user-info:hover {
-  background: var(--surface-2);
+  background: var(--surface-muted);
 }
 
 .username {
-  font-size: 14px;
+  font-size: 13px;
   color: var(--text-1);
   font-weight: 500;
 }
@@ -491,12 +585,20 @@ const handleCommand = (command) => {
 .content {
   flex: 1;
   overflow-y: auto;
-  padding: 22px;
+  padding: 18px 20px 24px;
 }
 
 @media (max-width: 768px) {
   .username {
     display: none;
+  }
+
+  .header {
+    padding: 8px 12px;
+  }
+
+  .header-title {
+    font-size: 16px;
   }
 
   .content {

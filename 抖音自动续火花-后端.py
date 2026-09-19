@@ -38,6 +38,27 @@ def _build_user_agent() -> str:
     return f"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_ver} Safari/537.36"
 
 
+def _clear_profile_locks(profile_dir: str):
+    """清理 Chromium 单例锁残留（Singleton*）。
+
+    容器被 docker 强制重建/浏览器被 kill -9 时，user-data-dir 里会残留
+    SingletonLock（指向已销毁容器的主机名）与已失效的 SingletonSocket，
+    导致新实例启动即退出，chromedriver 报 "DevToolsActivePort file doesn't exist"。
+    调用前请确保没有本项目启动的 Chromium 正在使用该资料目录。
+    """
+    removed = []
+    for name in ('SingletonLock', 'SingletonSocket', 'SingletonCookie'):
+        path = os.path.join(profile_dir, name)
+        try:
+            if os.path.islink(path) or os.path.exists(path):
+                os.remove(path)
+                removed.append(name)
+        except Exception as e:
+            print(f'⚠️ 清理浏览器配置锁 {name} 失败: {e}')
+    if removed:
+        log(f'🧹 已清理浏览器资料目录残留锁：{", ".join(removed)}')
+
+
 def unban_config():
     """构建并返回 ChromeOptions。
 
@@ -65,7 +86,26 @@ def unban_config():
     opts.add_argument('--no-default-browser-check')
     opts.add_argument('--disable-session-crashed-bubble')
     # 抑制"是否允许 xdg-open"外部协议确认弹窗（容器无桌面环境时每次启动都会弹）
-    opts.add_argument('--disable-features=ExternalProtocolDialog,Translate,MediaRouter')
+    opts.add_argument('--disable-features=ExternalProtocolDialog,Translate,MediaRouter,OptimizationHints,OptimizationGuideModelDownloading')
+    # 性能：Xvfb 下窗口不会获得焦点，Chromium 默认会节流后台定时器/渲染，导致自动化变慢
+    opts.add_argument('--disable-background-timer-throttling')
+    opts.add_argument('--disable-backgrounding-occluded-windows')
+    opts.add_argument('--disable-renderer-backgrounding')
+    opts.add_argument('--disable-ipc-flooding-protection')
+    opts.add_argument('--disable-hang-monitor')
+    opts.add_argument('--disable-component-update')
+    opts.add_argument('--disable-default-apps')
+    opts.add_argument('--no-pings')
+    # 保存登录数据（Cookie）：开启时使用持久化 user-data-dir，浏览器重启后仍保持抖音登录
+    if _config.get('save_session'):
+        try:
+            profile_dir = os.path.join(os.path.dirname(os.path.abspath(CONFIG_FILE)), 'chrome-profile')
+            os.makedirs(profile_dir, exist_ok=True)
+            _clear_profile_locks(profile_dir)
+            opts.add_argument(f'--user-data-dir={profile_dir}')
+            log(f'💾 已启用登录数据保存，浏览器资料目录：{profile_dir}')
+        except Exception as e:
+            log(f'⚠️ 启用登录数据保存失败（将使用临时目录）：{e}')
     opts.add_argument('--window-size=1280,720')  # 标准横版窗口，页面全部按钮可用
     opts.add_argument(f"--force-device-scale-factor={SCALE_FACTOR}")
     return opts
@@ -337,9 +377,11 @@ def _load_config():
         except Exception as e:
             print(f'⚠️ 配置读取失败，将使用默认配置: {e}')
             cfg = {}
-    # 配置文件仅用于持久化管理员密码；忽略历史遗留的其它配置字段
+    # 持久化字段：password（管理员密码哈希）、save_session（是否保存抖音登录数据，默认关闭）
     password = cfg.get('password')
+    save_session = bool(cfg.get('save_session', False))
     _config.clear()
+    _config['save_session'] = save_session
     if not password:
         _password_hash = _hash_password('123456')  # 默认密码 admin/123456
         _config['password'] = _password_hash
@@ -433,6 +475,14 @@ def _job_to_meta(job) -> dict:
     return {'time': time_str, 'name': name, 'text': text}
 
 
+def log(msg: str):
+    """统一日志输出（带时间戳，写入容器日志 docker logs 可见）。"""
+    try:
+        print(f'[{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] {msg}', flush=True)
+    except Exception:
+        pass
+
+
 def _save_tasks():
     """将当前定时任务（含已停用）持久化到 JSON 文件；须在 tasks_lock 内调用"""
     try:
@@ -457,7 +507,7 @@ def _load_tasks():
         paused_tasks.update(data.get('paused', {}))
         _pending_tasks.clear()
         _pending_tasks.update(data.get('scheduled', {}))
-        print(f'✅ 已从磁盘恢复 {len(_pending_tasks)} 个定时任务、{len(paused_tasks)} 个已停用任务')
+        log(f'📂 已从磁盘恢复 {len(_pending_tasks)} 个定时任务、{len(paused_tasks)} 个已停用任务')
     except Exception as e:
         print(f'⚠️ 任务恢复失败: {e}')
 
@@ -474,7 +524,7 @@ def _restore_scheduled_tasks():
             continue
         msg = AiqingGongyu_text() if not text else text
         try:
-            job = schedule.every().day.at(play_time).do(douyin.Send_Frinder, name, msg)
+            job = schedule.every().day.at(play_time).do(_scheduled_send, name, msg)
             scheduled_tasks[task_id] = job
             del _pending_tasks[task_id]
         except Exception as e:
@@ -485,29 +535,57 @@ _load_tasks()
 
 
 # 定时线程
+def _scheduled_send(name, text):
+    """定时任务执行入口：调用发送并输出执行结果日志（供 schedule 调度）。
+
+    入参保持 (name, text) 形态，与任务持久化/编辑解析逻辑一致。
+    """
+    preview = (text or '')[:30]
+    # 浏览器未就绪时不执行（也不报错）：避免容器刚启动、还没点「初始化浏览器」时误判为发送失败
+    if not (init and _driver_alive()):
+        log(f'⏭️ 定时任务跳过（浏览器未初始化）→ 好友：{name}｜请先在首页点击「初始化浏览器」')
+        return
+    log(f'⏰ 定时任务触发 → 好友：{name}')
+    try:
+        out = douyin.Send_Frinder(name, text)
+        if getattr(out, 'is_bool', False):
+            log(f'✅ 定时任务发送成功 → 好友：{name}｜内容：{preview}')
+        else:
+            log(f'❌ 定时任务发送失败 → 好友：{name}｜原因：{getattr(out, "string", "未知")}')
+    except Exception as e:
+        log(f'❌ 定时任务执行异常 → 好友：{name}｜错误：{e}')
+
+
 def run_schedule():
     """后台线程运行定时任务"""
     while True:
         try:
             schedule.run_pending()
         except Exception as e:
-            print(f'⚠️ 定时任务执行出错: {e}')
+            log(f'⚠️ 调度循环异常: {e}')
         time.sleep(1)
 
 
 _scheduler_started = False
+_scheduler_thread = None
 
 
 def start_scheduler():
     """启动定时任务调度线程（幂等：只启动一次，避免重初始化时重复调度）"""
-    global _scheduler_started
+    global _scheduler_started, _scheduler_thread
     with init_lock:
-        if _scheduler_started:
+        if _scheduler_started and _scheduler_thread and _scheduler_thread.is_alive():
             return None
-        scheduler_thread = threading.Thread(target=run_schedule, daemon=True)
-        scheduler_thread.start()
+        _scheduler_thread = threading.Thread(target=run_schedule, daemon=True)
+        _scheduler_thread.start()
         _scheduler_started = True
-    return scheduler_thread
+        log('调度器已启动（后台线程运行定时任务）')
+    return _scheduler_thread
+
+
+def _scheduler_alive():
+    """调度线程是否存活（用于状态检测）"""
+    return bool(_scheduler_thread and _scheduler_thread.is_alive())
 
 
 start_time = datetime.now(timezone.utc)
@@ -520,6 +598,29 @@ def Home(authorization: str = Header(None)):
     if auth_err:
         return auth_err
     return {'time': start_time}
+
+
+def _verify_login_state():
+    """实际校验抖音登录状态：浏览器可用且页面无登录面板才算已登录；失效则复位标记。"""
+    global Login_is_bool
+    if not Login_is_bool:
+        return False
+    if not _driver_alive():
+        if Login_is_bool:
+            Login_is_bool = False
+            log('登录状态失效：浏览器会话不可用，已复位为未登录')
+        return False
+    try:
+        with driver_lock:
+            driver.find_element(By.XPATH, '//*[@id="douyin_login_comp_flat_panel"]/picture')
+        if Login_is_bool:
+            Login_is_bool = False
+            log('登录状态失效：页面出现登录面板，已复位为未登录')
+        return False
+    except NoSuchElementException:
+        return True
+    except Exception:
+        return bool(Login_is_bool)
 
 
 def _driver_alive():
@@ -551,13 +652,59 @@ def _reset_driver_state():
         Login_is_bool = False
 
 
+def _create_browser_locked():
+    """创建浏览器会话（调用方必须已持有 init_lock，RLock 可重入）。
+
+    供 /Api/Init（首次初始化）与 /Api/ReInit（重新初始化）复用。
+    """
+    global init, driver, douyin, options
+
+    try:
+        options = unban_config()  # 每次新建，重试初始化不会叠加重复参数
+        new_driver = webdriver.Chrome(service=service, options=options) if service else webdriver.Chrome(options=options)
+        try:
+            new_driver.set_window_size(1280, 720)
+            new_driver.get('https://www.douyin.com/chat?isPopup=1')
+        except Exception:
+            try:
+                new_driver.quit()  # 已创建但未就绪，释放避免僵尸 Chrome 累积
+            except Exception:
+                pass
+            raise
+        driver = new_driver
+        douyin = Douyin(driver)
+        init = True
+        # 无窗口管理器环境：主动把抖音窗口置顶并移到 (0,0)，避免被其它窗口（如 VNC 里的前端浏览器）遮挡
+        try:
+            subprocess.run(
+                ['xdotool', 'search', '--name', 'douyin', 'windowraise', 'windowmove', '0', '0'],
+                timeout=5, capture_output=True,
+            )
+        except Exception:
+            pass
+        with tasks_lock:
+            _restore_scheduled_tasks()  # 恢复持久化的定时任务
+            _save_tasks()
+        start_scheduler()  # 启动调度线程（幂等）
+        log('🌐 浏览器初始化成功（Chromium 已启动并打开抖音）')
+        return {'code': 200, 'data': 'success'}
+    except SessionNotCreatedException as e:
+        log(f'❌ 浏览器会话创建失败：{e}')
+        if "This version of ChromeDriver only supports" in str(e):
+            return {'code': 400, 'data': '浏览器驱动与浏览器版本不匹配，请更新 chromedriver!'}
+        if 'DevToolsActivePort' in str(e):
+            return {'code': 400, 'data': '浏览器启动失败（多为登录资料目录残留锁），请点击「重新初始化浏览器」重试'}
+        return {'code': 400, 'data': f'浏览器会话创建失败: {str(e)}'}
+    except Exception as e:
+        log(f'❌ 浏览器初始化失败：{e}')
+        return {'code': 500, 'data': f'初始化失败: {str(e)}'}
+
+
 @app.get('/Api/Init')  # 初始化浏览器
 def Init(authorization: str = Header(None)):
     auth_err = require_auth(authorization)
     if auth_err:
         return auth_err
-
-    global init, driver, douyin, options
 
     with init_lock:
         # Chrome 崩溃/会话失效后 init 仍是 True：探测到失效则复位，允许重建
@@ -565,41 +712,19 @@ def Init(authorization: str = Header(None)):
             return {'code': 200, 'data': 'init Repeated!'}
         if init:
             _reset_driver_state()
+        return _create_browser_locked()
 
-        try:
-            options = unban_config()  # 每次新建，重试初始化不会叠加重复参数
-            new_driver = webdriver.Chrome(service=service, options=options) if service else webdriver.Chrome(options=options)
-            try:
-                new_driver.set_window_size(1280, 720)
-                new_driver.get('https://www.douyin.com/chat?isPopup=1')
-            except Exception:
-                try:
-                    new_driver.quit()  # 已创建但未就绪，释放避免僵尸 Chrome 累积
-                except Exception:
-                    pass
-                raise
-            driver = new_driver
-            douyin = Douyin(driver)
-            init = True
-            # 无窗口管理器环境：主动把抖音窗口置顶并移到 (0,0)，避免被其它窗口（如 VNC 里的前端浏览器）遮挡
-            try:
-                subprocess.run(
-                    ['xdotool', 'search', '--name', 'douyin', 'windowraise', 'windowmove', '0', '0'],
-                    timeout=5, capture_output=True,
-                )
-            except Exception:
-                pass
-            with tasks_lock:
-                _restore_scheduled_tasks()  # 恢复持久化的定时任务
-                _save_tasks()
-            start_scheduler()  # 启动调度线程（幂等）
-            return {'code': 200, 'data': 'success'}
-        except SessionNotCreatedException as e:
-            if "This version of ChromeDriver only supports" in str(e):
-                return {'code': 400, 'data': '浏览器驱动与浏览器版本不匹配，请更新 chromedriver!'}
-            return {'code': 400, 'data': f'浏览器会话创建失败: {str(e)}'}
-        except Exception as e:
-            return {'code': 500, 'data': f'初始化失败: {str(e)}'}
+
+@app.get('/Api/ReInit')  # 重新初始化浏览器（强制关闭现有会话并重建）
+def ReInit(authorization: str = Header(None)):
+    auth_err = require_auth(authorization)
+    if auth_err:
+        return auth_err
+
+    log('🔄 收到「重新初始化浏览器」请求，正在关闭现有浏览器会话…')
+    _reset_driver_state()  # 无论当前是否可用，先彻底释放，再重建
+    with init_lock:
+        return _create_browser_locked()
 
 
 @app.get('/Api/GetInit')  # 获取初始化状态
@@ -607,7 +732,53 @@ def GetInit(authorization: str = Header(None)):
     auth_err = require_auth(authorization)
     if auth_err:
         return auth_err
-    return {'code': 200, 'data': 'Yes' if init else 'No'}
+    # 准确性：已初始化且 driver 仍可用才算 Yes（浏览器崩溃/会话失效时返回 No）
+    alive = bool(init) and _driver_alive()
+    return {'code': 200, 'data': 'Yes' if alive else 'No'}
+
+
+@app.get('/Api/GetStatus')  # 综合运行状态（浏览器 / 登录 / 调度器 / 任务数）
+def GetStatus(authorization: str = Header(None)):
+    auth_err = require_auth(authorization)
+    if auth_err:
+        return auth_err
+    browser_ok = bool(init) and _driver_alive()
+    login_ok = browser_ok and _verify_login_state()
+    with tasks_lock:
+        active = len(scheduled_tasks)
+        paused = len(paused_tasks)
+    return {
+        'code': 200,
+        'data': {
+            'browser': 'Yes' if browser_ok else 'No',
+            'login': 'Yes' if login_ok else 'No',
+            'scheduler': 'Yes' if _scheduler_alive() else 'No',
+            'task_count': active,
+            'paused_count': paused,
+            'uptime_seconds': int((datetime.now(timezone.utc) - start_time).total_seconds()),
+        },
+    }
+
+
+@app.get('/Api/GetSaveSession')  # 是否保存抖音登录数据（Cookie）
+def GetSaveSession(authorization: str = Header(None)):
+    auth_err = require_auth(authorization)
+    if auth_err:
+        return auth_err
+    return {'code': 200, 'data': bool(_config.get('save_session', False))}
+
+
+@app.post('/Api/SetSaveSession')  # 设置是否保存抖音登录数据（持久化到配置文件）
+def SetSaveSession(payload: dict = Body(None), authorization: str = Header(None)):
+    auth_err = require_auth(authorization)
+    if auth_err:
+        return auth_err
+    body = payload or {}
+    enabled = bool(body.get('enabled'))
+    _config['save_session'] = enabled
+    _save_config()
+    log(f'⚙️ 设置变更：保存登录数据（Cookie）→ {"开启" if enabled else "关闭"}（重新初始化浏览器后生效）')
+    return {'code': 200, 'data': enabled}
 
 
 @app.post('/Api/login')  # 登录 传入 Base64Cookie
@@ -639,6 +810,7 @@ def Login(payload: dict = Body(None), authorization: str = Header(None)):
                 return {'code': 404, 'data': 'login-error-cooker cant login'}
             except NoSuchElementException:
                 Login_is_bool = True
+                log('🔑 登录状态变更：Cookie 登录成功')
                 return {'code': 200, 'data': 'ok'}
     else:
         return {'code': 404, 'data': 'login-error-not cooker'}  # # @#z
@@ -663,6 +835,7 @@ def PngLogin(authorization: str = Header(None)):
                 return {'code': 200, 'data': 'No'}
             except NoSuchElementException:
                 Login_is_bool = True
+                log('🔑 登录状态变更：Cookie 登录成功')
                 return {'code': 200, 'data': 'ok'}
         else:
             return {'code': 200, 'data': 'No'}  # # @#z
@@ -673,7 +846,8 @@ def GetLogin(authorization: str = Header(None)):
     auth_err = require_auth(authorization)
     if auth_err:
         return auth_err
-    return {'code': 200, 'data': 'Yes' if Login_is_bool else 'No'}
+    # 准确性：不只读取标记，而是实际校验一次（浏览器可用 + 页面无登录面板）
+    return {'code': 200, 'data': 'Yes' if _verify_login_state() else 'No'}
 
 
 @app.get('/Api/login/Init/GetLoginPng')  # 获取登录扫码
@@ -773,9 +947,77 @@ def Send(payload: dict = Body(None), authorization: str = Header(None)):
     # Send_Frinder 内部已调用 Updara_FrinderList，这里不再重复全量爬取
     out = Douyin.Send_Frinder(douyin, name, text)
     if out.is_bool:
+        log(f'💬 手动发送消息 → 好友：{name}｜内容：{(text or "")[:30]}')
         return {'code': 200, 'data': 'Send successfully'}
     else:
         return {'code': 404, 'data': out.string}
+
+
+_self_avatar_cache = ''  # 当前登录抖音账号头像 URL 缓存
+
+
+def _extract_self_avatar():
+    """获取当前登录抖音账号的头像 URL（需在 driver_lock 内调用）。
+
+    优先级：① 页面 JSON（userInfo 的头像字段，登录后即可用）
+            ② DOM 中的头像 img（发消息时自己头像会渲染在聊天气泡旁）
+            ③ 上次缓存值
+    命中后写入缓存，后续调用直接返回。
+    """
+    global _self_avatar_cache
+    js = (
+        "var d = window._ROUTER_DATA || window.__INITIAL_STATE__ || null;"
+        "if (!d) return null;"
+        "var hit = null;"
+        "(function walk(o){"
+        "  if (!o || typeof o !== 'object' || hit) return;"
+        "  if (Array.isArray(o)) { for (var i=0;i<o.length;i++) walk(o[i]); return; }"
+        "  var ks = Object.keys(o);"
+        "  for (var i=0;i<ks.length;i++){"
+        "    var k = ks[i], v = o[k];"
+        "    if ((k === 'userInfo' || k === 'user_info') && v && typeof v === 'object' && typeof v.nickname === 'string') {"
+        "      var names = ['avatar_thumb','avatar_larger','avatar_168x168','avatar_300x300','avatar_medium','avatar_100x100'];"
+        "      for (var j=0;j<names.length;j++){"
+        "        var a = v[names[j]];"
+        "        if (typeof a === 'string' && a) { hit = a; return; }"
+        "        if (a && a.url_list && a.url_list.length) { hit = a.url_list[0]; return; }"
+        "      }"
+        "      var direct = v.avatarUri || v.avatarUrl || v.avatar_uri || v.avatar_url;"
+        "      if (typeof direct === 'string' && direct) { hit = direct; return; }"
+        "      var ks2 = Object.keys(v);"
+        "      for (var m=0;m<ks2.length;m++){"
+        "        if (ks2[m].toLowerCase().indexOf('avatar') >= 0) {"
+        "          var av = v[ks2[m]];"
+        "          if (typeof av === 'string' && av) { hit = av; return; }"
+        "          if (av && av.url_list && av.url_list.length) { hit = av.url_list[0]; return; }"
+        "        }"
+        "      }"
+        "      return;"
+        "    }"
+        "    walk(v);"
+        "  }"
+        "})(d);"
+        "return hit;"
+    )
+    try:
+        url = driver.execute_script(js)
+        if url:
+            _self_avatar_cache = str(url)
+            return _self_avatar_cache
+    except Exception:
+        pass
+    # ② DOM 兜底：聊天消息区里自己的头像（取最后一张抖音头像 img）
+    try:
+        imgs = driver.find_elements(By.XPATH, '//img[contains(@src,"douyinpic.com")]')
+        for el in reversed(imgs):
+            src = el.get_attribute('src')
+            if src and 'avatar' in src:
+                _self_avatar_cache = src
+                return src
+    except Exception:
+        pass
+    # ③ 最后返回缓存
+    return _self_avatar_cache or ''
 
 
 def _extract_nickname():
@@ -828,6 +1070,22 @@ def _extract_nickname():
     return None
 
 
+@app.get('/Api/GetUserInfo')  # 获取当前登录抖音账号信息（昵称 + 头像）
+def GetUserInfoAll(authorization: str = Header(None)):
+    auth_err = require_auth(authorization)
+    if auth_err:
+        return auth_err
+    init_err = require_init()
+    if init_err:
+        return init_err
+    if not _verify_login_state():
+        return {'code': 400, 'data': '未登录'}
+    with driver_lock:
+        nickname = _extract_nickname() or ''
+        avatar = _extract_self_avatar() or ''
+    return {'code': 200, 'data': {'nickname': nickname, 'avatar': avatar}}
+
+
 @app.get('/Api/GetUsername')  # 获取用户名
 def GetUserInfo(authorization: str = Header(None)):
     auth_err = require_auth(authorization)
@@ -877,6 +1135,7 @@ def DieLogin(authorization: str = Header(None)):
         driver.delete_all_cookies()
         driver.refresh()
     Login_is_bool = False
+    log('🚪 登录状态变更：已清除 Cookie（强制退出登录）')
     return {'code': 200, 'data': '已清除Cooke'}
 
 
@@ -928,6 +1187,7 @@ def authorizations(code: str, authorization: str = Header(None)):
                 return {'code': 400, 'data': '登录失败'}
             except:
                 Login_is_bool = True
+                log('🔑 登录状态变更：验证码登录成功')
                 return {'code': 200, 'data': '登录成功'}
     except Exception as e:
         return {'code': 400, 'data': str(e)}
@@ -980,9 +1240,10 @@ def add_time(payload: dict = Body(None), authorization: str = Header(None)):
             parts = existing_id.split('_', 1)
             if len(parts) == 2 and parts[1] == name:
                 return {'code': 400, 'data': f'好友 {name} 已有定时任务，请先删除或修改'}
-        job = schedule.every().day.at(play_time).do(douyin.Send_Frinder, name, msg)
+        job = schedule.every().day.at(play_time).do(_scheduled_send, name, msg)
         scheduled_tasks[task_id] = job
         _save_tasks()
+    log(f'📌 新增定时任务 → 好友：{name}｜时间：{play_time}｜内容：{(msg or "")[:30]}')
     return {'code': 200, 'data': f'已添加定时任务: {play_time}', 'task_id': task_id}
 
 
@@ -998,10 +1259,12 @@ def del_time(task_id: str, authorization: str = Header(None)):
             schedule.cancel_job(job)
             del scheduled_tasks[task_id]
             _save_tasks()
+            log(f'🗑️ 删除定时任务 → {task_id}')
             return {'code': 200, 'data': f'已删除任务: {task_id}'}
         elif task_id in paused_tasks:
             del paused_tasks[task_id]
             _save_tasks()
+            log(f'🗑️ 删除定时任务 → {task_id}')
             return {'code': 200, 'data': f'已删除任务: {task_id}'}
         else:
             return {'code': 404, 'data': '任务ID不存在'}
@@ -1058,7 +1321,7 @@ def edit_time(name: str, new_time: str, authorization: str = Header(None)):
         schedule.cancel_job(scheduled_tasks[old_task_id])
 
         # 创建新任务
-        new_job = schedule.every().day.at(new_play_time).do(douyin.Send_Frinder, name, msg)
+        new_job = schedule.every().day.at(new_play_time).do(_scheduled_send, name, msg)
 
         # 生成新任务ID并替换
         new_task_id = f"{new_play_time}_{name}"
@@ -1066,6 +1329,7 @@ def edit_time(name: str, new_time: str, authorization: str = Header(None)):
         del scheduled_tasks[old_task_id]
         _save_tasks()
 
+    log(f'🕒 修改定时任务时间 → 好友：{name}｜{old_time} → {new_play_time}')
     return {
         'code': 200,
         'data': f'已将 {name} 的定时任务从 {old_time} 修改为 {new_play_time}',
@@ -1129,6 +1393,7 @@ def pause_time(task_id: str, authorization: str = Header(None)):
         del scheduled_tasks[task_id]
         paused_tasks[task_id] = {'time': time_str, 'name': name, 'text': text}
         _save_tasks()
+    log(f'⏸️ 停用定时任务 → {task_id}')
     return {'code': 200, 'data': f'已停用任务: {task_id}'}
 
 
@@ -1149,12 +1414,13 @@ def enable_time(task_id: str, authorization: str = Header(None)):
         text = info.get('text')
         msg = AiqingGongyu_text() if not text else text
         try:
-            job = schedule.every().day.at(play_time).do(douyin.Send_Frinder, name, msg)
+            job = schedule.every().day.at(play_time).do(_scheduled_send, name, msg)
         except Exception as e:
             return {'code': 400, 'data': f'启用任务失败: {str(e)}'}
         scheduled_tasks[task_id] = job
         del paused_tasks[task_id]
         _save_tasks()
+    log(f'▶️ 启用定时任务 → {task_id}')
     return {'code': 200, 'data': f'已启用任务: {task_id}'}
 
 
@@ -1236,6 +1502,7 @@ def logout(authorization: str = Header(None)):
         return auth_err
     token = authorization[7:]
     remove_token(token)
+    log('🚪 管理员已退出登录')
     return {'code': 200, 'data': '已退出登录'}
 
 
@@ -1260,6 +1527,21 @@ def change_password(payload: dict = Body(None), authorization: str = Header(None
     with tokens_lock:
         _valid_tokens.clear()
     return {'code': 200, 'data': '密码修改成功，请重新登录'}
+
+
+def _startup_restore():
+    """进程启动即恢复定时任务并拉起调度线程。
+
+    这样首页「定时任务」数量与「下次执行」在浏览器初始化前就是准确的；
+    真正执行时若浏览器未就绪，_scheduled_send 会自动跳过并记录日志。
+    """
+    with tasks_lock:
+        _restore_scheduled_tasks()
+        _save_tasks()
+    start_scheduler()  # 在 tasks_lock 之外调用，避免与 init_lock → tasks_lock 的加锁顺序相反
+
+
+_startup_restore()
 
 
 if __name__ == "__main__":

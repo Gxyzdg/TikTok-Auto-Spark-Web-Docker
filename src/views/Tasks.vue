@@ -1,30 +1,24 @@
 <template>
   <div class="page">
-    <div class="page-header animate-fade-in-up">
-      <div>
-        <div class="page-header__title">定时任务管理</div>
-        <div class="page-header__subtitle">为好友创建每日定时发送任务，自动续火花</div>
-      </div>
-      <div class="page-header__actions">
-        <el-button :icon="Refresh" @click="refreshAll" :loading="loading">刷新</el-button>
-        <el-button v-if="!selectionMode" type="primary" :icon="Plus" @click="openAddDialog">
-          添加任务
+    <div class="toolbar animate-fade-in-up">
+      <el-button :icon="Refresh" @click="refreshAll" :loading="loading">刷新</el-button>
+      <el-button v-if="!selectionMode" type="primary" :icon="Plus" @click="openAddDialog">
+        添加任务
+      </el-button>
+      <el-button
+        v-if="!selectionMode && taskList.length > 0"
+        type="success"
+        :icon="Tickets"
+        @click="selectionMode = true"
+      >
+        多选
+      </el-button>
+      <template v-else>
+        <el-button type="danger" :icon="Delete" @click="handleBatchDelete" :loading="batchDeleteLoading">
+          删除 ({{ selectedTasks.length }})
         </el-button>
-        <el-button
-          v-if="!selectionMode && taskList.length > 0"
-          type="success"
-          :icon="Tickets"
-          @click="selectionMode = true"
-        >
-          多选
-        </el-button>
-        <template v-else>
-          <el-button type="danger" :icon="Delete" @click="handleBatchDelete" :loading="batchDeleteLoading">
-            删除 ({{ selectedTasks.length }})
-          </el-button>
-          <el-button :icon="Close" @click="cancelSelection">取消</el-button>
-        </template>
-      </div>
+        <el-button :icon="Close" @click="cancelSelection">取消</el-button>
+      </template>
     </div>
 
     <el-card shadow="never">
@@ -312,11 +306,6 @@ const handleBatchDelete = async () => {
 </script>
 
 <style scoped>
-.page {
-  max-width: 1280px;
-  margin: 0 auto;
-}
-
 .next-run {
   display: flex;
   align-items: center;

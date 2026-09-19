@@ -1,12 +1,5 @@
 <template>
   <div class="page">
-    <div class="page-header animate-fade-in-up">
-      <div>
-        <div class="page-header__title">设置</div>
-        <div class="page-header__subtitle">账户登录、密码与系统配置</div>
-      </div>
-    </div>
-
     <!-- 账户配置 -->
     <el-card shadow="never">
       <template #header>
@@ -41,6 +34,20 @@
         <el-button type="danger" plain :icon="SwitchButton" @click="handleDieLogin">
           强制退出登录
         </el-button>
+      </div>
+
+      <div class="section-divider"></div>
+
+      <div class="config-row">
+        <div class="config-item">
+          <span class="config-label">保存登录数据（Cookie）</span>
+          <el-switch
+            v-model="saveSession"
+            :loading="saveSessionLoading"
+            @change="handleSaveSessionChange"
+          />
+        </div>
+        <span class="switch-hint">开启后重启浏览器/容器仍保持抖音登录；默认关闭，修改后需重新初始化浏览器生效</span>
       </div>
     </el-card>
 
@@ -196,7 +203,7 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Key, Refresh, View, Loading, Edit, Lock, Document, SwitchButton, Picture, Message, WarnTriangleFilled, Star, TopRight } from '@element-plus/icons-vue'
-import { getLoginStatus, initBrowser, getLoginPng, login, getUsername, changePassword, getLastLoginIP, getFriendsList, getCooker, pnglogin, getScrlk, dieLogin, sendVerifyCode, submitVerifyCode, forceLogin } from '../api/douyin'
+import { getLoginStatus, initBrowser, getLoginPng, login, getUsername, changePassword, getLastLoginIP, getFriendsList, getCooker, pnglogin, getScrlk, dieLogin, sendVerifyCode, submitVerifyCode, forceLogin, getSaveSession, setSaveSession } from '../api/douyin'
 import { loginStatus, setLoginStatus, setFriendsList } from '../stores/browser'
 import { formatFriendsList } from '../utils/format'
 
@@ -209,6 +216,9 @@ const qrcodeUrl = ref('')
 const loading = ref(false)
 // 检测登录状态前的二次确认弹窗
 const checkConfirmVisible = ref(false)
+// 保存登录数据（Cookie）开关
+const saveSession = ref(false)
+const saveSessionLoading = ref(false)
 const vncUrl = `http://${window.location.hostname}:6080/`
 const manualDialogVisible = ref(false)
 const manualLoading = ref(false)
@@ -296,6 +306,28 @@ const handleRefreshStatus = async () => {
 const handleCheckLogin = () => {
   // 先弹出二次确认：提示前往 VNC 完成二次验证后再检测
   checkConfirmVisible.value = true
+}
+
+const loadSaveSession = async () => {
+  try {
+    const res = await getSaveSession()
+    saveSession.value = !!res.data
+  } catch (e) {
+    // 错误已由响应拦截器统一提示
+  }
+}
+
+const handleSaveSessionChange = async (val) => {
+  saveSessionLoading.value = true
+  try {
+    const res = await setSaveSession(val)
+    saveSession.value = !!res.data
+    ElMessage.success(val ? '已开启：将保存抖音登录数据（重新初始化浏览器后生效）' : '已关闭：不再保存抖音登录数据')
+  } catch (e) {
+    saveSession.value = !val
+  } finally {
+    saveSessionLoading.value = false
+  }
 }
 
 const openVnc = () => {
@@ -607,6 +639,7 @@ const handleLogin = async () => {
 }
 
 onMounted(async () => {
+  loadSaveSession()
   // 首次加载
   if (!settingsLoaded.value) {
     await checkLoginStatus()
@@ -680,6 +713,12 @@ onUnmounted(() => {
   font-size: 12px;
   color: var(--text-3);
   white-space: nowrap;
+}
+
+.switch-hint {
+  font-size: 12px;
+  color: var(--text-3);
+  line-height: 1.5;
 }
 
 .config-item {

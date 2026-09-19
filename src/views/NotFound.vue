@@ -28,18 +28,16 @@ const goHome = () => router.push('/home')
 }
 
 .notfound-code {
-  font-size: 96px;
-  font-weight: 800;
+  font-size: 64px;
+  font-weight: 700;
   line-height: 1;
   letter-spacing: -0.02em;
-  background: var(--gradient);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
+  color: var(--primary);
+  font-variant-numeric: tabular-nums;
 }
 
 .notfound-tip {
-  font-size: 15px;
+  font-size: 13.5px;
   color: var(--text-3);
   margin: 0;
 }

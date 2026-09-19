@@ -79,6 +79,9 @@ api.interceptors.response.use(
 // 初始化浏览器（首次可能联网下载 chromedriver + 冷启动 Chrome，超时放宽到 120s，与反代超时对齐）
 export const initBrowser = () => api.get('/Api/Init', { timeout: 120000 })
 
+// 重新初始化浏览器（强制关闭现有会话并重建，冷启动超时同 Init）
+export const reInitBrowser = () => api.get('/Api/ReInit', { timeout: 120000 })
+
 // 获取初始化状态
 export const getInitStatus = () => api.get('/Api/GetInit')
 
@@ -137,6 +140,18 @@ export const enableTask = (task_id) => api.get('/Time/enable', { params: { task_
 
 // 获取任务列表
 export const getTaskList = () => api.get('/Time/getlist')
+
+// 当前登录抖音账号信息（昵称 + 头像）
+export const getUserInfo = () => api.get('/Api/GetUserInfo')
+
+// 是否保存抖音登录数据（Cookie）
+export const getSaveSession = () => api.get('/Api/GetSaveSession')
+
+// 设置是否保存抖音登录数据（Cookie）
+export const setSaveSession = (enabled) => api.post('/Api/SetSaveSession', { enabled })
+
+// 综合运行状态（浏览器/登录/调度器/任务数）
+export const getStatus = () => api.get('/Api/GetStatus')
 
 // 获取用户名
 export const getUsername = () => api.get('/Api/GetUsername')

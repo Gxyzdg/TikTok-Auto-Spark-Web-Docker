@@ -1,7 +1,7 @@
 {
   "name": "tiktok-auto-spark-web",
   "private": true,
-  "version": "1.2.1",
+  "version": "1.4.1",
   "description": "抖音火花助手 - 抖音好友火花自动续期 Web 管理平台",
   "type": "module",
   "scripts": {
