@@ -554,6 +554,12 @@ def _scheduled_send(name, text):
     if remote_control_active():
         log(f'⏭️ 定时任务跳过（正在远程操作浏览器/人工验证中）→ 好友：{name}｜本次不再重试')
         return
+    # 页面被导航到别处时先拉回聊天页（否则一定发不出去）
+    _ensure_douyin_page('定时任务执行前')
+    # 抖音登录态失效时明确跳过，避免被记成"发送失败"让人误以为任务写错了
+    if not _verify_login_state():
+        log(f'⏭️ 定时任务跳过（抖音未登录/登录已失效）→ 好友：{name}｜请到「登录向导」重新登录')
+        return
     _dismiss_browser_dialogs('定时任务执行前')
     log(f'⏰ 定时任务触发 → 好友：{name}')
     try:
@@ -610,27 +616,88 @@ def Home(authorization: str = Header(None)):
     return {'time': start_time}
 
 
+# 登录态探测用的页面标志 / Cookie（扫码登录成功后只能靠这些判断，不能只信内存标志位）
+_LOGIN_PANEL_XPATH = '//*[@id="douyin_login_comp_flat_panel"]/picture'
+_LOGIN_OK_XPATHS = (
+    '//div[@class="conversationConversationListwrapper"]',  # 聊天页会话列表（登录后才加载）
+    '//*[@id="douyin-header"]//img',                        # 顶部自己的头像
+    '//*[@id="douyin_right_header"]//img',
+)
+_LOGIN_COOKIE_KEYS = ('sessionid', 'sessionid_ss', 'sid_tt')
+
+
+def _detect_login_state():
+    """主动探测抖音登录态（须在 driver_lock 内调用）。
+
+    扫码登录成功后页面不会主动通知后端，必须实际看页面/Cookie，判定顺序：
+      1) 出现登录面板 → 未登录；
+      2) 出现会话列表或自己的头像 → 已登录；
+      3) 兜底：持有抖音登录态 Cookie（sessionid 系列）且当前不在登录/通行证页 → 已登录。
+    """
+    # 先看当前页面：浏览器可能被临时导航到别的页面（例如用 VNC 打开了容器内的管理页），
+    # 此时既看不到登录面板也读不到抖音 Cookie，不能据此判定"未登录"，保持既有状态即可。
+    try:
+        cur_url = driver.current_url or ''
+    except Exception:
+        cur_url = ''
+    if cur_url and 'douyin.com' not in cur_url:
+        return bool(Login_is_bool)
+
+    cookies = {}
+    try:
+        for c in driver.get_cookies():
+            cookies[c.get('name')] = c.get('value')
+    except Exception:
+        pass
+    has_session = any(cookies.get(k) for k in _LOGIN_COOKIE_KEYS)
+
+    try:
+        driver.find_element(By.XPATH, _LOGIN_PANEL_XPATH)
+        return False  # 登录面板还在 → 未登录
+    except NoSuchElementException:
+        pass
+    except Exception:
+        return bool(has_session)
+
+    for xpath in _LOGIN_OK_XPATHS:
+        try:
+            driver.find_element(By.XPATH, xpath)
+            return True
+        except NoSuchElementException:
+            continue
+        except Exception:
+            break
+
+    try:
+        url = (driver.current_url or '')
+    except Exception:
+        url = ''
+    if has_session and 'login' not in url and 'passport' not in url:
+        return True
+    return False
+
+
 def _verify_login_state():
-    """实际校验抖音登录状态：浏览器可用且页面无登录面板才算已登录；失效则复位标记。"""
+    """校验抖音登录状态：以页面实际状态为准，并同步内存标志位。
+
+    历史问题：早期实现只在 Login_is_bool 为真时才去核对页面，而**扫码登录成功这条路径没人置真**，
+    于是"登录成功了却一直显示未登录"。现在每次都主动探测，状态变化时打日志。
+    """
     global Login_is_bool
-    if not Login_is_bool:
-        return False
     if not _driver_alive():
         if Login_is_bool:
             Login_is_bool = False
-            log('登录状态失效：浏览器会话不可用，已复位为未登录')
+            log('🔑 登录状态变更：浏览器会话不可用，已复位为未登录')
         return False
     try:
         with driver_lock:
-            driver.find_element(By.XPATH, '//*[@id="douyin_login_comp_flat_panel"]/picture')
-        if Login_is_bool:
-            Login_is_bool = False
-            log('登录状态失效：页面出现登录面板，已复位为未登录')
-        return False
-    except NoSuchElementException:
-        return True
-    except Exception:
+            ok = _detect_login_state()
+    except Exception as e:
         return bool(Login_is_bool)
+    if ok != Login_is_bool:
+        Login_is_bool = ok
+        log('🔑 登录状态变更：' + ('已登录' if ok else '未登录（登录面板未通过 / 会话失效）'))
+    return ok
 
 
 def _driver_alive():
@@ -1170,6 +1237,19 @@ _remote_control_active = False       # 是否有人正在网页端远程操作�
 _SCREEN_TICKET_TTL = 30              # 票据有效期（秒）
 _cdp_msg_id = 0
 _cdp_id_lock = threading.Lock()
+_last_remote_input_at = 0.0          # 最近一次收到远程输入的时间（用于避免清弹窗打扰用户操作）
+_remote_input_lock = threading.Lock()
+
+
+def _mark_remote_input():
+    global _last_remote_input_at
+    with _remote_input_lock:
+        _last_remote_input_at = time.time()
+
+
+def _remote_input_recent(window=1.5):
+    with _remote_input_lock:
+        return (time.time() - _last_remote_input_at) < window
 
 
 def _cdp_id():
@@ -1258,6 +1338,22 @@ def _recover_douyin_page(reason=''):
     except Exception as e:
         log(f'⚠️ 自动刷新页面失败：{e}')
         return False
+
+
+def _ensure_douyin_page(reason=''):
+    """确保浏览器停在抖音聊天页：被导航到别处时自动拉回，避免自动化失效。
+
+    须在 driver_lock 之外调用。返回 True 表示当前已在抖音页。
+    """
+    try:
+        with driver_lock:
+            url = driver.current_url or ''
+    except Exception:
+        return False
+    if 'douyin.com' in url:
+        return True
+    log(f'↩️ 浏览器当前不在抖音页（{url[:60]}），自动拉回聊天页（{reason or "自动恢复"}）')
+    return _recover_douyin_page(reason or '自动拉回聊天页')
 
 
 def _viewport_info():
@@ -1425,9 +1521,15 @@ async def ScreenStream(websocket: WebSocket):
     log('🖥️ 远程画面会话已连接（CDP 串流开始）')
 
     async def dialog_watchdog():
-        """串流期间定期清弹窗：用户在画面里点击可能再次触发外部协议确认框。"""
+        """串流期间定期清弹窗：用户在画面里点击可能再次触发外部协议确认框。
+
+        若最近 1.5 秒内收到过远程输入，说明用户正在操作且输入是通的，此时不打扰
+        （弹窗一旦出现会吞掉输入，届时自然不再有输入，下一轮就会清理）。
+        """
         while True:
             await asyncio.sleep(3)
+            if _remote_input_recent():
+                continue
             await asyncio.to_thread(_dismiss_browser_dialogs)
 
     async def cdp_to_client(cdp):
@@ -1456,6 +1558,7 @@ async def ScreenStream(websocket: WebSocket):
         first = True
         while True:
             msg = await websocket.receive_json()
+            _mark_remote_input()
             cmds = _input_commands(msg)
             if first:
                 log(f'🖥️ 远程输入通道就绪：首个消息 type={msg.get("t")} → {len(cmds)} 条 CDP 命令')

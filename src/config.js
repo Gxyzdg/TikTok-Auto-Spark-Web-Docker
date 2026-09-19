@@ -34,7 +34,7 @@ export const VNC_ENABLED = String(runtime.vncEnabled ?? '1') !== '0'
 export const FRONTEND_PORT = locationPort || import.meta.env.VITE_FRONTEND_PORT || '8080'
 
 /** noVNC 对外端口（容器里用 NOVNC_PORT 环境变量指定） */
-export const NOVNC_PORT = String(runtime.novncPort || import.meta.env.VITE_NOVNC_PORT || '6080')
+export const NOVNC_PORT = String(runtime.novncPort || import.meta.env.VITE_NOVNC_PORT || '14321')
 
 /** noVNC 网页版地址（跟随当前访问的协议与主机） */
 export const NOVNC_URL =
