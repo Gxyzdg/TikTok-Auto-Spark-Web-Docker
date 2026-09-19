@@ -18,7 +18,7 @@ ARG APP_VERSION=v1.5.0
 ENV VITE_APP_VERSION=${APP_VERSION}
 WORKDIR /build
 COPY package.json package-lock.json ./
-RUN npm ci --no-audit --no-fund   # 严格按 package-lock.json 安装，保证可复现
+RUN npm ci --no-audit --no-fund --registry=https://registry.npmmirror.com   # 严格按 lockfile + 国内镜像
 COPY . .
 RUN npm run build
 # 产物在 /build/dist
@@ -92,7 +92,8 @@ EOF
 # 后端依赖
 WORKDIR /app
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+# 使用国内镜像源：直连 PyPI 在国内会非常慢（实测十几分钟都装不完）
+RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
 COPY 抖音自动续火花-后端.py ./抖音自动续火花-后端.py
 
 # 前端产物 + nginx 配置 + 启动脚本 + noVNC 首页

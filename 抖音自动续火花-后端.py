@@ -218,20 +218,22 @@ class Douyin:
     # 一次 JS 调用把整屏会话解析成 [{name, avatar, fire}]：
     # 以"名字元素"为锚点就地向上找整行，再在行内取头像/火花，避免用序号拼 xpath
     # （列表虚拟滚动且按最近消息动态排序，序号会串到别人）。
-    _EXTRACT_FRIENDS_JS = """
+    _EXTRACT_FRIENDS_JS = r"""
         const w = arguments[0];
-        const titles = [...w.querySelectorAll('%(title)s')].filter(e => !/Wrapper/.test(e.className));
+        const titleSel = '%(title)s';
+        const isTitle = (e) => e.className.indexOf('Wrapper') < 0;
+        const titles = [].slice.call(w.querySelectorAll(titleSel)).filter(isTitle);
         const rows = [];
         for (const t of titles) {
-          const name = (t.innerText || '').trim().split('\n')[0].trim();
+          const name = (t.innerText || '').replace(/\s+/g, ' ').trim().split('\n')[0].trim();
           if (!name) continue;
-          // 以名字元素为锚点向上找"整行"：最多爬 4 层，且该祖先内必须只有一个名字元素
-          // （否则说明已经爬到列表容器，会取到别人的头像/火花 → 宁可留空也不能取错人）
+          // 以名字元素为锚点向上找"整行"：最多爬 4 层，且该祖先内只能有一个名字元素
+          // （否则说明已爬到列表容器，会取到别人的头像/火花 → 宁可留空也不能取错人）
           let row = null;
           let node = t;
           for (let i = 0; i < 4 && node.parentElement; i++) {
             node = node.parentElement;
-            const cnt = [...node.querySelectorAll('%(title)s')].filter(e => !/Wrapper/.test(e.className)).length;
+            const cnt = [].slice.call(node.querySelectorAll(titleSel)).filter(isTitle).length;
             if (cnt === 1 && node.querySelector('%(avatar)s')) { row = node; break; }
           }
           const img = row ? row.querySelector('%(avatar)s') : null;
@@ -405,17 +407,23 @@ class Douyin:
                 return True   # 空文本消息只能靠条数判断
         return False
 
-    _CLICK_FRIEND_JS = """
+    # 只负责"按名字找到会话行并滚动到可视区"，返回元素本身；
+    # 点击交给 Selenium（真实输入事件）—— 页面里的 element.click() 不被抖音的 React 处理器接受
+    _FIND_FRIEND_JS = r"""
         const w = arguments[0], want = arguments[1];
-        const norm = (v) => (v || '').replace(/\\s+/g, '');
-        const find = () => [...w.querySelectorAll('%(title)s')]
-            .filter(e => !/Wrapper/.test(e.className))
-            .find(e => norm((e.innerText || '').split('\\n')[0]) === norm(want));
+        const norm = (v) => (v || '').replace(/\s+/g, '');
+        const titleSel = '%(title)s';
+        const isTitle = (e) => e.className.indexOf('Wrapper') < 0;
+        const find = () => [].slice.call(w.querySelectorAll(titleSel))
+            .filter(isTitle)
+            .filter(function (e) {
+              return norm((e.innerText || '').split('\n')[0]) === norm(want);
+            })[0];
         let hit = find();
         // 虚拟列表：边滚边找（滚动 wrapper 及其所有可滚动后代，而不是只滚 wrapper 自身）
         for (let round = 0; !hit && round < 12; round++) {
           let moved = false;
-          const all = [w].concat([...w.querySelectorAll('*')]);
+          const all = [w].concat([].slice.call(w.querySelectorAll('*')));
           for (const e of all) {
             if (e.scrollHeight > e.clientHeight + 2) {
               const before = e.scrollTop;
@@ -426,18 +434,17 @@ class Douyin:
           if (!moved) break;
           hit = find();
         }
-        if (!hit) return 'notfound';
-        const row = hit.closest('[class*="conversationConversationItem"]') || hit;
-        row.scrollIntoView({block: 'center'});
-        row.click();
-        return 'ok';
+        if (!hit) return null;
+        hit.scrollIntoView({block: 'center'});
+        return hit;
     """ % {'title': _FRIEND_TITLE_SEL}
 
     def _click_friend(self, name):
-        """按名字查找并点击会话行。
+        """按名字找到会话行并点击。
 
-        整个查找+滚动+点击都在页面里一次完成：避免"元素过期"、避免 xpath 字面量
-        （名字含双引号会构造失败）、也避免只滚动 wrapper 自身导致非首屏好友永远找不到。
+        查找与滚动在页面里完成（避免元素过期、xpath 字面量、虚拟列表只滚 wrapper 的问题），
+        但**点击用 Selenium 真实事件**：页面内 element.click() 不被抖音 React 处理器接受，
+        会出现"点了但会话没切换"。
         返回 (是否成功, 错误信息)。
         """
         try:
@@ -445,11 +452,16 @@ class Douyin:
         except Exception:
             return False, '聊天页未就绪（找不到会话列表）'
         try:
-            result = driver.execute_script(self._CLICK_FRIEND_JS, wrapper, name)
+            el = driver.execute_script(self._FIND_FRIEND_JS, wrapper, name)
+        except Exception as e:
+            return False, f'查找好友失败：{str(e)[:80]}'
+        if el is None:
+            return False, '会话列表里没有找到该好友'
+        time.sleep(0.4)
+        try:
+            el.click()
         except Exception as e:
             return False, f'点击好友失败：{str(e)[:80]}'
-        if result == 'notfound':
-            return False, '会话列表里没有找到该好友'
         return True, ''
 
     def Send_Frinder(self, name: str, text: str):
