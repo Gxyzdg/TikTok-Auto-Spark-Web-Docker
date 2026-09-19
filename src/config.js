@@ -17,7 +17,7 @@ const locationPort = (() => {
   return protocol === 'https:' ? '443' : '80'
 })()
 
-export const APP_VERSION = import.meta.env.VITE_APP_VERSION || 'v1.5.0'
+export const APP_VERSION = import.meta.env.VITE_APP_VERSION || 'v1.5.1'
 
 /**
  * 后端直连地址（首页「API 地址」展示用）。
