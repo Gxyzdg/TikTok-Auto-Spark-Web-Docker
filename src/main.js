@@ -7,13 +7,11 @@ import 'element-plus/theme-chalk/dark/css-vars.css'
 
 import router from './router'
 import App from './App.vue'
+import { applyTheme, isDark } from './stores/theme'
 import './style.css'
 
-// 初始化主题（暗色/亮色），避免闪烁
-const savedTheme = localStorage.getItem('theme')
-if (savedTheme === 'dark') {
-  document.documentElement.classList.add('dark')
-}
+// 应用主题（index.html 里已有首屏引导，这里保证与状态一致）
+applyTheme(isDark.value)
 
 const app = createApp(App)
 

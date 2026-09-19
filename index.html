@@ -6,6 +6,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="抖音火花助手 - 抖音好友火花自动续期可视化管理系统" />
     <title>抖音火花助手 · 管理后台</title>
+    <script>
+      // 首屏主题引导：在样式加载前就确定亮/暗，避免暗色用户看到白屏闪烁
+      /* SPARK_THEME_BOOT */
+      (function () {
+        try {
+          var dark = localStorage.getItem('theme') === 'dark';
+          document.documentElement.classList.toggle('dark', dark);
+          document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
+        } catch (e) {}
+      })();
+    </script>
     <!-- 运行时配置：由容器 entrypoint 按实际端口映射生成（自定义端口后无需重新构建前端） -->
     <script src="/runtime-config.js"></script>
   </head>

@@ -28,6 +28,14 @@ EOF
 chmod 644 /usr/share/nginx/html/runtime-config.js   # nginx 以 www-data 运行，必须可读
 echo "[entrypoint] 已写入运行时配置：noVNC 端口 ${NOVNC_PORT} / 后端端口 ${API_PORT}"
 
+# 容器重启时 /tmp 会保留上一次运行的残留文件：
+#   - /tmp/.X99-lock 会让新的 Xvfb 直接报 "Server is already active for display 99" 后退出，
+#     进而触发 wait -n 退出 → 容器陷入无限重启（必须清理，否则 docker restart 必崩）
+DISPLAY_NUM="${DISPLAY#:}"
+echo "[entrypoint] 清理上一次运行的 X 残留（锁文件 / socket / 日志）..."
+rm -f "/tmp/.X${DISPLAY_NUM}-lock" "/tmp/.X11-unix/X${DISPLAY_NUM}" 2>/dev/null || true
+rm -f /tmp/xvfb.log /tmp/openbox.log /tmp/x11vnc.log /tmp/websockify.log 2>/dev/null || true
+
 echo "[entrypoint] 启动虚拟显示器 Xvfb (${DISPLAY}) ..."
 # 屏幕尺寸与浏览器 window-size 一致；如需更小的 VNC 视图可自行调整
 Xvfb "$DISPLAY" -screen 0 1400x900x24 -ac +extension RANDR >/tmp/xvfb.log 2>&1 &

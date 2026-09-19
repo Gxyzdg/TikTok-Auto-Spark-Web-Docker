@@ -90,9 +90,9 @@
               role="button"
               tabindex="0"
               :aria-label="isDark ? '切换亮色模式' : '切换暗色模式'"
-              @click="toggleDark"
-              @keydown.enter="toggleDark"
-              @keydown.space.prevent="toggleDark"
+              @click="toggleTheme"
+              @keydown.enter="toggleTheme"
+              @keydown.space.prevent="toggleTheme"
             >
               <Sunny v-if="isDark" />
               <Moon v-else />
@@ -135,6 +135,7 @@ import { logout, getInitStatus, getLoginStatus } from '../api/douyin'
 import { browserStatus, loginStatus, setBrowserStatus, setLoginStatus } from '../stores/browser'
 import FlameIcon from '../components/FlameIcon.vue'
 import { APP_VERSION, NOVNC_URL, VNC_ENABLED } from '../config'
+import { isDark, toggleTheme } from '../stores/theme'
 import {
   Fold,
   Expand,
@@ -160,13 +161,6 @@ const userStore = useUserStore()
 const isCollapsed = ref(false)
 const isMobile = ref(false)
 const sidebarVisible = ref(false)
-const isDark = ref(document.documentElement.classList.contains('dark'))
-
-const toggleDark = () => {
-  isDark.value = !isDark.value
-  document.documentElement.classList.toggle('dark', isDark.value)
-  localStorage.setItem('theme', isDark.value ? 'dark' : 'light')
-}
 
 const checkMobile = () => {
   isMobile.value = window.innerWidth < 768
@@ -519,19 +513,24 @@ const handleCommand = (command) => {
   text-overflow: ellipsis;
 }
 
-.collapse-btn {
-  font-size: 18px;
+/* 顶栏两个图标按钮（折叠侧栏 / 切换主题）保持完全一致的尺寸，避免大小不一 */
+.collapse-btn,
+.theme-toggle {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 17px;
   cursor: pointer;
   color: var(--text-2);
-  padding: 4px;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   transition: color var(--dur) ease, background-color var(--dur) ease;
 }
 
-.collapse-btn:hover {
-  color: var(--primary);
-  background: var(--surface-muted);
-}
+.collapse-btn:hover,
+
 
 .header-right {
   display: flex;
@@ -539,26 +538,14 @@ const handleCommand = (command) => {
   gap: 6px;
 }
 
-.theme-toggle {
-  font-size: 17px;
-  color: var(--text-2);
-  cursor: pointer;
-  padding: 6px;
-  border-radius: var(--radius-sm);
-  transition: color var(--dur) ease, background-color var(--dur) ease;
-}
 
-.theme-toggle:hover {
-  color: var(--primary);
-  background: var(--surface-muted);
-}
 
 .user-info {
   display: flex;
   align-items: center;
   gap: 8px;
   cursor: pointer;
-  padding: 5px 8px 5px 6px;
+  padding: 6px 10px;
   border-radius: var(--radius-md);
   transition: background-color var(--dur) ease;
 }

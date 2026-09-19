@@ -1,5 +1,30 @@
 <template>
   <div class="page">
+    <!-- 界面外观 -->
+    <el-card shadow="never">
+      <template #header>
+        <span class="card-title">界面外观</span>
+      </template>
+
+      <div class="setting-row">
+        <div class="setting-main">
+          <div class="setting-title">暗黑模式</div>
+          <div class="setting-desc">切换后台的亮色 / 暗色主题，设置会保存在本机浏览器，下次打开自动生效</div>
+        </div>
+        <div class="setting-control">
+          <span class="setting-hint">{{ isDark ? '暗黑' : '明亮' }}</span>
+          <el-switch
+            :model-value="isDark"
+            size="large"
+            inline-prompt
+            active-text="暗"
+            inactive-text="亮"
+            @change="handleThemeChange"
+          />
+        </div>
+      </div>
+    </el-card>
+
     <!-- 账户配置 -->
     <el-card shadow="never">
       <template #header>
@@ -205,6 +230,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Key, Refresh, View, Loading, Edit, Lock, Document, SwitchButton, Picture, Message, WarnTriangleFilled, Star, TopRight } from '@element-plus/icons-vue'
 import { getLoginStatus, initBrowser, getLoginPng, login, getUsername, changePassword, getLastLoginIP, getFriendsList, getCooker, pnglogin, getScrlk, dieLogin, sendVerifyCode, submitVerifyCode, forceLogin, getSaveSession, setSaveSession } from '../api/douyin'
 import { NOVNC_URL } from '../config'
+import { isDark, setTheme } from '../stores/theme'
 import { loginStatus, setLoginStatus, setFriendsList } from '../stores/browser'
 import { formatFriendsList } from '../utils/format'
 
@@ -612,6 +638,12 @@ const handleForceLogin = async () => {
   }
 }
 
+// 主题切换（共享模块负责持久化到 localStorage）
+const handleThemeChange = (val) => {
+  setTheme(!!val)
+  ElMessage.success(val ? '已切换到暗黑模式' : '已切换到明亮模式')
+}
+
 const handleLogin = async () => {
   loginLoading.value = true
   loading.value = true
@@ -666,6 +698,45 @@ onUnmounted(() => {
 
 .stack-card {
   margin-top: 18px;
+}
+
+/* 设置项行（左说明 + 右控件） */
+.setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.setting-main {
+  min-width: 0;
+}
+
+.setting-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+.setting-desc {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.setting-control {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.setting-hint {
+  font-size: 12.5px;
+  color: var(--text-2);
+  min-width: 28px;
+  text-align: right;
 }
 
 .card-title {
