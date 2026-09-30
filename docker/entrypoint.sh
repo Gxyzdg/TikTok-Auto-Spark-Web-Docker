@@ -80,7 +80,7 @@ else
 fi
 
 echo "[entrypoint] 启动后端 uvicorn (${HOST}:${PORT}) ..."
-python3 /app/抖音自动续火花-后端.py &
+python3 -u /app/抖音自动续火花-后端.py &   # -u 无缓冲：否则应用日志会被缓冲，很久才出现在 docker logs 里，无法及时排障
 BACKEND_PID=$!
 
 echo "[entrypoint] 启动 nginx ..."

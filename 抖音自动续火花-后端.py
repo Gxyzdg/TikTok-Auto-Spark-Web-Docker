@@ -130,6 +130,13 @@ def unban_config():
             log(f'⚠️ 启用登录数据保存失败（将使用临时目录）：{e}')
     opts.add_argument('--window-size=1280,720')  # 标准横版窗口，页面全部按钮可用
     opts.add_argument(f"--force-device-scale-factor={SCALE_FACTOR}")
+    # 抖音页面会长时间保持资源加载（长轮询/流式请求），默认的 normal 策略要等 load 事件，
+    # 很容易触发页面加载超时（"Timed out receiving message from renderer"）导致初始化被判失败。
+    # eager = DOMContentLoaded 后就返回，足够后续用 DOM 轮询判断页面是否可用。
+    try:
+        opts.page_load_strategy = 'eager'
+    except Exception:
+        pass
     return opts
 
 
@@ -400,11 +407,14 @@ class Douyin:
         deadline = time.time() + timeout
         while time.time() < deadline:
             time.sleep(0.4)
+            cur = self._my_message_count()
+            # 基线是在消息区加载稳定后才取的，所以"条数增加"同样可靠。
+            # 两种判据取或：网络慢时"末条文本"可能来不及渲染，只看它会误报失败
+            #（历史日志里就有这种误报："❌ 定时任务发送失败：消息未出现在会话中"）
+            if before_count is not None and cur is not None and cur > before_count:
+                return True
             if target and self._last_my_bubble_text() == target:
                 return True
-            cur = self._my_message_count()
-            if target == '' and cur is not None and before_count is not None and cur > before_count:
-                return True   # 空文本消息只能靠条数判断
         return False
 
     # 只负责"按名字找到会话行并滚动到可视区"，返回元素本身；
@@ -510,9 +520,15 @@ class Douyin:
                     seng.send_keys(Keys.ENTER)
 
                     # ③ 校验消息确实出现在会话里，否则视为失败（不再误报成功）
-                    if self._wait_message_sent(before, text, timeout=5.0):
+                    if self._wait_message_sent(before, text, timeout=12.0):
                         return TrueString(True, None)
-                    last_error = '消息未出现在会话中（发送未生效）'
+                    try:
+                        cur_cnt = self._my_message_count()
+                        last_txt = (self._last_my_bubble_text() or '')[:20]
+                    except Exception:
+                        cur_cnt, last_txt = None, ''
+                    last_error = (f'消息未出现在会话中（发送未生效）'
+                                  f'[基线={before} 当前={cur_cnt} 末条="{last_txt}"]')
                 except Exception as e:
                     last_error = str(e)
             return TrueString(False, last_error or '发送失败')
@@ -552,6 +568,8 @@ init_lock = threading.RLock()    # 保护 Init 的 check-then-act，避免并发
 tasks_lock = threading.RLock()   # 保护 scheduled_tasks / paused_tasks 的并发读写
 tokens_lock = threading.Lock()   # 保护 _valid_tokens 的并发访问
 config_lock = threading.RLock()  # 保护 _config 的并发读写
+_tasks_load_failed = False
+_last_login_warn_state = None    # 看门狗记录上次登录态，避免重复刷告警
 _tasks_load_failed = False       # 任务文件读取失败标志：为真时禁止写回，避免用空数据覆盖掉原文件
 _config_load_failed = False      # 配置文件读取失败标志：为真时禁止写回
 # 默认关闭 Swagger/OpenAPI（它们经 nginx 是匿名可达的，会泄露全部接口清单）；
@@ -1089,12 +1107,33 @@ def _create_browser_locked():
             # 关键：给 WebDriver 命令加超时。页面卡死时若无超时，调用会永久阻塞，
             # 而调用方持有 driver_lock，会把所有 API 线程一起拖死（连登录接口都打不开）
             try:
-                new_driver.set_page_load_timeout(45)
+                new_driver.set_page_load_timeout(120)   # 放宽：抖音首屏有时很慢
                 new_driver.set_script_timeout(20)
             except Exception:
                 pass
             new_driver.set_window_size(1280, 720)
-            new_driver.get('https://www.douyin.com/chat?isPopup=1')
+            try:
+                new_driver.get('https://www.douyin.com/chat?isPopup=1')
+            except Exception as nav_err:
+                # 关键：页面加载超时**不代表**浏览器不可用（抖音资源长期不结束很常见）。
+                # 老逻辑直接抛出去 → 关掉刚建好的浏览器 → 初始化永远失败。
+                log(f'⚠️ 打开抖音页时超时/异常（继续按页面内容判断可用性）：{str(nav_err)[:120]}')
+            # 用 DOM 轮询确认页面真的可用（登录面板或会话列表出现），最多等 30 秒
+            ready = False
+            deadline = time.time() + 60
+            while time.time() < deadline:
+                try:
+                    if driver.find_elements(By.XPATH, '//div[@class="conversationConversationListwrapper"]') \
+                       or driver.find_elements(By.XPATH, '//*[@id="douyin_login_comp_flat_panel"]'):
+                        ready = True
+                        break
+                except Exception:
+                    pass
+                time.sleep(1.0)
+            if ready:
+                log('✅ 抖音页面已就绪')
+            else:
+                log('⚠️ 抖音页面 60 秒内未出现登录面板/会话列表，仍按可用处理（可能是网络较慢）')
         except Exception:
             try:
                 new_driver.quit()  # 已创建但未就绪，释放避免僵尸 Chrome 累积
@@ -2478,12 +2517,34 @@ def _browser_watchdog():
     """
     if os.environ.get('BROWSER_WATCHDOG', '1').strip().lower() in ('0', 'false', 'no', 'off'):
         return
+    last_try = 0.0
     while True:
         time.sleep(60)
         try:
             if not init:
+                # 初始化失败/从未成功时也要兜底重试：否则一旦自动初始化 5 次都用完，
+                # 浏览器就永远起不来（用户点初始化也失败时会卡死在这个状态）
+                if not (_driver_alive() if driver else False) and time.time() - last_try > 300:
+                    last_try = time.time()
+                    log('🩺 看门狗发现浏览器未初始化，尝试自动初始化…')
+                    with init_lock:
+                        if not init:
+                            res = _create_browser_locked()
+                            log(f'🩺 自动初始化结果：{res}')
                 continue
             if _driver_alive():
+                # 顺带监控登录态：抖音会话过期后尽早告警一次，而不是等当天任务发送失败才发现
+                global _last_login_warn_state
+                try:
+                    ok = _verify_login_state()
+                    if not ok and _last_login_warn_state is not False:
+                        _last_login_warn_state = False
+                        log('⚠️ 检测到抖音登录已失效（会话过期），请到「登录向导」重新扫码登录，否则定时任务会一直失败')
+                    elif ok and _last_login_warn_state is not True:
+                        _last_login_warn_state = True
+                        log('🔑 抖音登录状态正常')
+                except Exception:
+                    pass
                 if not _remote_input_recent(10):
                     _dismiss_browser_dialogs()
                 continue

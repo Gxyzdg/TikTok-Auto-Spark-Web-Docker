@@ -1,0 +1,57 @@
+{
+  "original": "/vol1/@appdata/deepseek.harness/home/TikTok/vnc-after-init-top.png",
+  "rebuilt": "/vol1/@appdata/deepseek.harness/home/TikTok/vnc-after-click-top.png",
+  "threshold": 16,
+  "width": 700,
+  "height": 1600,
+  "differingPixels": 12739,
+  "totalPixels": 1120000,
+  "diffRatio": 0.0114,
+  "worstRegions": [
+    {
+      "x1": 352,
+      "y1": 0,
+      "x2": 440,
+      "y2": 200,
+      "ratio": 0.1427,
+      "differing": 2511,
+      "total": 17600
+    },
+    {
+      "x1": 616,
+      "y1": 0,
+      "x2": 700,
+      "y2": 200,
+      "ratio": 0.1001,
+      "differing": 1681,
+      "total": 16800
+    },
+    {
+      "x1": 176,
+      "y1": 0,
+      "x2": 264,
+      "y2": 200,
+      "ratio": 0.1,
+      "differing": 1760,
+      "total": 17600
+    },
+    {
+      "x1": 264,
+      "y1": 0,
+      "x2": 352,
+      "y2": 200,
+      "ratio": 0.1,
+      "differing": 1760,
+      "total": 17600
+    },
+    {
+      "x1": 440,
+      "y1": 0,
+      "x2": 528,
+      "y2": 200,
+      "ratio": 0.1,
+      "differing": 1760,
+      "total": 17600
+    }
+  ]
+}
