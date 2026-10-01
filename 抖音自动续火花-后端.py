@@ -396,7 +396,20 @@ class Douyin:
             prev = cur
         return prev
 
-    def _wait_message_sent(self, before_count, text, timeout=6.0):
+    def _recent_my_bubble_texts(self, n=3):
+        """最近 n 条"我发出的消息"文本（宽容校验用）。"""
+        try:
+            els = driver.find_elements(By.XPATH, '//*[contains(@class,"messageMessageBoxisFromMe")]')
+            out = []
+            for el in els[-n:]:
+                t = (el.text or '').strip()
+                if t:
+                    out.append(t)
+            return out
+        except Exception:
+            return []
+
+    def _wait_message_sent(self, before_count, text, timeout=15.0):
         """确认消息真的进了会话：以"最后一条自己的消息内容 == 本条内容"为主，数量增加为辅。
 
         历史问题：老实现发完回车直接返回成功；后来改成"条数增加即成功"也不够严谨——
@@ -408,13 +421,16 @@ class Douyin:
         while time.time() < deadline:
             time.sleep(0.4)
             cur = self._my_message_count()
-            # 基线是在消息区加载稳定后才取的，所以"条数增加"同样可靠。
-            # 两种判据取或：网络慢时"末条文本"可能来不及渲染，只看它会误报失败
-            #（历史日志里就有这种误报："❌ 定时任务发送失败：消息未出现在会话中"）
+            # 判据从宽，但必须有：任一成立即算成功
+            #   ① 我发出的消息条数增加（基线在消息区稳定后才取，可靠）
+            #   ② 最后一条自己的消息内容 == 本条内容
+            #   ③ 最近 3 条自己的消息里出现本条内容（应对渲染顺序/气泡拆分）
             if before_count is not None and cur is not None and cur > before_count:
                 return True
-            if target and self._last_my_bubble_text() == target:
-                return True
+            if target:
+                recent = self._recent_my_bubble_texts(3)
+                if recent and any(t == target for t in recent):
+                    return True
         return False
 
     # 只负责"按名字找到会话行并滚动到可视区"，返回元素本身；
@@ -529,6 +545,10 @@ class Douyin:
                         cur_cnt, last_txt = None, ''
                     last_error = (f'消息未出现在会话中（发送未生效）'
                                   f'[基线={before} 当前={cur_cnt} 末条="{last_txt}"]')
+                    if attempt == 1:
+                        log(f'⚠️ 发送校验未通过，重试一次 → 好友：{name}')
+                        time.sleep(1.0)
+                        continue
                 except Exception as e:
                     last_error = str(e)
             return TrueString(False, last_error or '发送失败')
@@ -874,36 +894,49 @@ _load_tasks()
 
 # 定时线程
 def _scheduled_send(name, text, _retried=False):
-    """定时任务执行入口：调用发送并输出执行结果日志（供 schedule 调度）。
+    """定时任务执行入口：调用发送、**校验发送结果**并输出日志（供 schedule 调度）。
 
     入参保持 (name, text) 形态，与任务持久化/编辑解析逻辑一致；
     _retried 标记用于"顺延重试一次"，避免无限重试。
     """
     preview = (text or '')[:30]
-    # 浏览器未就绪时不执行（也不报错）：避免容器刚启动、还没点「初始化浏览器」时误判为发送失败
+
+    def _later(minutes, why):
+        """顺延重试一次（只重试一次，避免无限循环）。"""
+        if _retried:
+            log(f'❌ 定时任务最终未发送（{why}）→ 好友：{name}')
+            return
+        threading.Timer(minutes * 60, lambda: _scheduled_send(name, text, True)).start()
+        log(f'⏳ 定时任务暂缓（{why}）→ 好友：{name}｜已安排 {minutes} 分钟后重试')
+
+    # 浏览器未就绪：顺延重试，而不是直接放弃当天（老实现会静默漏发）
     if not (init and _driver_alive()):
-        log(f'⏭️ 定时任务跳过（浏览器未初始化）→ 好友：{name}｜请先在首页点击「初始化浏览器」')
+        _later(5, '浏览器未初始化')
         return
-    # 有人正在网页端远程操作（登录向导里的二次验证）时让路，避免打断人工操作
     if remote_control_active():
-        log(f'⏭️ 定时任务跳过（正在远程操作浏览器/人工验证中）→ 好友：{name}｜本次不再重试')
+        _later(15, '正在远程操作浏览器/人工验证中')
         return
     # 页面被导航到别处时先拉回聊天页（否则一定发不出去）
     _ensure_douyin_page('定时任务执行前')
-    # 抖音登录态失效时明确跳过，避免被记成"发送失败"让人误以为任务写错了
     if not _verify_login_state():
-        log(f'⏭️ 定时任务跳过（抖音未登录/登录已失效）→ 好友：{name}｜请到「登录向导」重新登录')
+        _later(30, '抖音未登录/登录已失效，请到「登录向导」重新登录')
         return
     _dismiss_browser_dialogs('定时任务执行前')
     log(f'⏰ 定时任务触发 → 好友：{name}')
     try:
         out = douyin.Send_Frinder(name, text)
         if getattr(out, 'is_bool', False):
-            log(f'✅ 定时任务发送成功 → 好友：{name}｜内容：{preview}')
-        else:
-            log(f'❌ 定时任务发送失败 → 好友：{name}｜原因：{getattr(out, "string", "未知")}')
+            log(f'✅ 定时任务发送成功（已校验）→ 好友：{name}｜内容：{preview}')
+            return
+        reason = str(getattr(out, 'string', '未知'))
+        log(f'❌ 定时任务发送失败 → 好友：{name}｜原因：{reason}')
+        # 只有"明确没发出去"的原因才顺延重试；
+        # "消息未出现在会话中"这类**校验不通过**不重试（消息可能已经发出），避免重复发送
+        if any(k in reason for k in ('未切换', '没有找到该好友', '未获取到好友列表', '点击', '输入框')):
+            _later(10, f'发送未生效（{reason[:40]}）')
     except Exception as e:
         log(f'❌ 定时任务执行异常 → 好友：{name}｜错误：{e}')
+        _later(10, f'执行异常（{str(e)[:40]}）')
 
 
 def run_schedule():
@@ -2143,27 +2176,25 @@ def add_time(payload: dict = Body(None), authorization: str = Header(None)):
     time = str(body.get('time') or '')
     name = str(body.get('name') or '').strip()
     text = body.get('text')
-    # 快速去重检查（含已停用），避免重复任务
+    play_time = format_time(time)
+    msg = AiqingGongyu_text() if not text else text  # 空串也视为未自定义，避免注册发空消息
+    task_id = f"{play_time}_{name}"
+
+    # 去重规则：同一个好友**同一时间**只能有一个任务（同一好友不同时间允许多个任务）
     with tasks_lock:
-        for task_id in list(scheduled_tasks.keys()) + list(paused_tasks.keys()):
-            parts = task_id.split('_', 1)
-            if len(parts) == 2 and parts[1] == name:
-                return {'code': 400, 'data': f'好友 {name} 已有定时任务，请先删除或修改'}
+        if task_id in scheduled_tasks or task_id in paused_tasks:
+            return {'code': 400, 'data': f'好友 {name} 在 {play_time} 已有定时任务'}
+        if task_id in _pending_tasks:
+            return {'code': 400, 'data': f'好友 {name} 在 {play_time} 已有定时任务'}
 
     temp = douyin.Find_Friends(name)
     if not temp.is_bool:
         return {'code': 404, 'data': temp.string}
 
-    play_time = format_time(time)
-    msg = AiqingGongyu_text() if not text else text  # 空串也视为未自定义，避免注册发空消息
-    task_id = f"{play_time}_{name}"
-
     # 原子化：再次去重 + 注册任务 + 持久化
     with tasks_lock:
-        for existing_id in list(scheduled_tasks.keys()) + list(paused_tasks.keys()):
-            parts = existing_id.split('_', 1)
-            if len(parts) == 2 and parts[1] == name:
-                return {'code': 400, 'data': f'好友 {name} 已有定时任务，请先删除或修改'}
+        if task_id in scheduled_tasks or task_id in paused_tasks or task_id in _pending_tasks:
+            return {'code': 400, 'data': f'好友 {name} 在 {play_time} 已有定时任务'}
         job = schedule.every().day.at(play_time).do(_scheduled_send, name, msg)
         scheduled_tasks[task_id] = job
         _save_tasks()
@@ -2190,107 +2221,146 @@ def del_time(task_id: str, authorization: str = Header(None)):
             _save_tasks()
             log(f'🗑️ 删除定时任务 → {task_id}')
             return {'code': 200, 'data': f'已删除任务: {task_id}'}
+        elif task_id in _pending_tasks:
+            # 尚未注册进 schedule（浏览器未初始化期间）也要能删除
+            del _pending_tasks[task_id]
+            _save_tasks()
+            log(f'🗑️ 删除定时任务（待初始化）→ {task_id}')
+            return {'code': 200, 'data': f'已删除任务: {task_id}'}
         else:
             return {'code': 404, 'data': '任务ID不存在'}
 
 
 @app.get('/Time/edit')
-def edit_time(name: str, new_time: str, authorization: str = Header(None)):
+def edit_time(new_time: str, task_id: str = None, name: str = None, text: str = None, authorization: str = Header(None)):
+    """修改定时任务的执行时间。
+
+    同一好友可以有多个任务（不同时间），因此优先用 task_id 精确定位；
+    只传 name 时要求该好友只有一个任务，否则返回歧义提示。
+    不需要浏览器在线（待初始化的任务也能改）。
+    """
     auth_err = require_auth(authorization)
     if auth_err:
         return auth_err
-    init_err = require_init()
-    if init_err:
-        return init_err
-    """修改指定好友的定时任务时间"""
-    # 读取旧任务信息（短锁，只做快速读）
-    with tasks_lock:
-        old_task_id = None
-        old_job = None
-        for task_id, job in scheduled_tasks.items():
-            parts = task_id.split('_', 1)
-            if len(parts) == 2 and parts[1] == name:
-                old_task_id = task_id
-                old_job = job
-                break
-
-        if not old_task_id:
-            return {'code': 404, 'data': f'好友 {name} 没有定时任务'}
-
-        # 解析旧任务信息
-        parts = old_task_id.split('_', 1)
-        old_time = parts[0] if len(parts) == 2 else ""
-
-        # 保留原有消息内容（自定义消息不被每日名言覆盖）
-        msg = None
-        try:
-            args = old_job.job_func.args
-            if len(args) > 1:
-                msg = args[1]
-        except Exception:
-            msg = None
-
-    # 计算新时间；若与旧时间相同则不做任何变更，避免任务被误删（幽灵任务）
     new_play_time = format_time(new_time)
-    if new_play_time == old_time:
-        return {'code': 200, 'data': '执行时间未变化，任务保持不变', 'task_id': old_task_id}
 
-    if not msg:
-        msg = AiqingGongyu_text()
-
-    # 原子化：再次确认任务仍在 + 取消旧任务 + 创建新任务 + 持久化
     with tasks_lock:
-        if old_task_id not in scheduled_tasks:
-            return {'code': 404, 'data': f'好友 {name} 没有定时任务'}
-        schedule.cancel_job(scheduled_tasks[old_task_id])
+        target_id = None
+        if task_id and task_id in (list(scheduled_tasks) + list(paused_tasks) + list(_pending_tasks)):
+            target_id = task_id
+        elif name:
+            candidates = [tid for tid in (list(scheduled_tasks) + list(paused_tasks) + list(_pending_tasks))
+                          if tid.split('_', 1)[-1] == name]
+            if len(candidates) > 1:
+                return {'code': 400, 'data': f'好友 {name} 有多个定时任务，请分别修改'}
+            if candidates:
+                target_id = candidates[0]
+        if not target_id:
+            return {'code': 404, 'data': '没有找到该定时任务'}
+        if '_' not in target_id:
+            return {'code': 400, 'data': '任务ID格式异常，无法修改'}
+        old_time, real_name = target_id.split('_', 1)
 
-        # 创建新任务
-        new_job = schedule.every().day.at(new_play_time).do(_scheduled_send, name, msg)
+        # 内容：显式传入则更新，否则保留原有内容（自定义内容不被每日默认内容覆盖）
+        msg = (text or '').strip() or None
+        if msg is None and target_id in scheduled_tasks:
+            try:
+                args = scheduled_tasks[target_id].job_func.args
+                if len(args) > 1:
+                    msg = args[1]
+            except Exception:
+                msg = None
+        elif msg is None and target_id in paused_tasks:
+            msg = paused_tasks[target_id].get('text')
+        elif msg is None:
+            msg = _pending_tasks[target_id].get('text')
 
-        # 生成新任务ID并替换
-        new_task_id = f"{new_play_time}_{name}"
-        scheduled_tasks[new_task_id] = new_job
-        del scheduled_tasks[old_task_id]
+        if new_play_time == old_time:
+            return {'code': 200, 'data': '执行时间未变化，任务保持不变', 'task_id': target_id}
+
+        new_task_id = f"{new_play_time}_{real_name}"
+        if new_task_id != target_id and new_task_id in (list(scheduled_tasks) + list(paused_tasks) + list(_pending_tasks)):
+            return {'code': 400, 'data': f'好友 {real_name} 在 {new_play_time} 已有定时任务'}
+
+        if not msg:
+            msg = AiqingGongyu_text()
+
+        if target_id in scheduled_tasks:
+            old_job = scheduled_tasks[target_id]
+            try:
+                new_job = schedule.every().day.at(new_play_time).do(_scheduled_send, real_name, msg)
+            except Exception as e:
+                return {'code': 400, 'data': f'修改失败：{str(e)}'}
+            schedule.cancel_job(old_job)
+            del scheduled_tasks[target_id]
+            scheduled_tasks[new_task_id] = new_job
+        elif target_id in paused_tasks:
+            info = paused_tasks.pop(target_id)
+            info.update({'time': new_play_time, 'name': real_name, 'text': msg})
+            paused_tasks[new_task_id] = info
+        else:
+            meta = _pending_tasks.pop(target_id)
+            meta.update({'time': new_play_time, 'name': real_name, 'text': msg})
+            _pending_tasks[new_task_id] = meta
         _save_tasks()
 
-    log(f'🕒 修改定时任务时间 → 好友：{name}｜{old_time} → {new_play_time}')
-    return {
-        'code': 200,
-        'data': f'已将 {name} 的定时任务从 {old_time} 修改为 {new_play_time}',
-        'old_time': old_time,
-        'new_time': new_play_time,
-        'task_id': new_task_id
-    }
+    log(f'🕒 修改定时任务时间 → 好友：{real_name}｜{old_time} → {new_play_time}')
+    return {'code': 200, 'data': f'已修改为 {new_play_time}', 'task_id': new_task_id}
 
 
 @app.get('/Time/getlist')
 def get_time_list(authorization: str = Header(None)):
+    """获取当前所有定时任务列表（含内容、已停用、以及等待浏览器初始化的任务）"""
     auth_err = require_auth(authorization)
     if auth_err:
         return auth_err
-    """获取当前所有定时任务列表"""
     tasks = []
     with tasks_lock:
         for task_id, job in list(scheduled_tasks.items()):
-            # 解析任务ID获取信息
             parts = task_id.split('_', 1)
-            if len(parts) == 2:
-                time_str, name = parts
-                tasks.append({
-                    'task_id': task_id,
-                    'time': time_str,
-                    'name': name,
-                    'active': True,
-                    'next_run': str(job.next_run) if job.next_run else None
-                })
+            time_str = parts[0] if len(parts) == 2 else ''
+            name = parts[1] if len(parts) == 2 else ''
+            text = None
+            try:
+                args = job.job_func.args
+                if len(args) > 1:
+                    text = args[1]
+                if len(args) > 0 and not name:
+                    name = args[0]
+            except Exception:
+                pass
+            tasks.append({
+                'task_id': task_id,
+                'time': time_str,
+                'name': name,
+                'text': text,                       # 任务内容（None 表示每日默认内容）
+                'active': True,
+                'pending': False,
+                'next_run': job.next_run.strftime('%Y-%m-%d %H:%M') if job.next_run else None,
+            })
         for task_id, info in list(paused_tasks.items()):
             tasks.append({
                 'task_id': task_id,
                 'time': info.get('time', ''),
                 'name': info.get('name', ''),
+                'text': info.get('text'),
                 'active': False,
-                'next_run': None
+                'pending': False,
+                'next_run': None,
             })
+        # 等待浏览器初始化、尚未注册进 schedule 的任务也要显示，
+        # 否则容器重启（或浏览器没起来）期间列表是空的，用户会以为任务丢了
+        for task_id, meta in list(_pending_tasks.items()):
+            tasks.append({
+                'task_id': task_id,
+                'time': meta.get('time', ''),
+                'name': meta.get('name', ''),
+                'text': meta.get('text'),
+                'active': True,
+                'pending': True,
+                'next_run': None,
+            })
+    tasks.sort(key=lambda t: (t.get('time') or '99:99', t.get('name') or ''))
     return {'code': 200, 'data': {'count': len(tasks), 'tasks': tasks}}
 
 
@@ -2300,6 +2370,12 @@ def pause_time(task_id: str, authorization: str = Header(None)):
     if auth_err:
         return auth_err
     with tasks_lock:
+        if task_id in _pending_tasks:
+            # 还没注册进 schedule（浏览器未初始化）：直接转成"已停用"记录
+            paused_tasks[task_id] = dict(_pending_tasks.pop(task_id))
+            _save_tasks()
+            log(f'⏸️ 停用定时任务（待初始化）→ {task_id}')
+            return {'code': 200, 'data': f'已停用任务: {task_id}'}
         job = scheduled_tasks.get(task_id)
         if not job:
             return {'code': 404, 'data': '任务ID不存在或已停用'}
@@ -2317,8 +2393,8 @@ def pause_time(task_id: str, authorization: str = Header(None)):
         del scheduled_tasks[task_id]
         paused_tasks[task_id] = {'time': time_str, 'name': name, 'text': text}
         _save_tasks()
-    log(f'⏸️ 停用定时任务 → {task_id}')
-    return {'code': 200, 'data': f'已停用任务: {task_id}'}
+        log(f'⏸️ 停用定时任务 → {task_id}')
+        return {'code': 200, 'data': f'已停用任务: {task_id}'}
 
 
 @app.get('/Time/enable')  # 启用定时任务

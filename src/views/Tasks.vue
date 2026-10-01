@@ -28,9 +28,17 @@
               <el-tag type="warning" effect="plain">{{ row.time }}</el-tag>
             </template>
           </el-table-column>
+          <el-table-column label="内容" min-width="150">
+            <template #default="{ row }">
+              <span class="task-text" :title="row.text || ''" :class="{ 'text-muted': !row.text }">
+                {{ row.text || '（每日默认内容）' }}
+              </span>
+            </template>
+          </el-table-column>
           <el-table-column label="下次执行" min-width="180">
             <template #default="{ row }">
-              <span v-if="row.active" class="next-run">
+              <el-tag v-if="row.pending" type="warning" effect="plain">待初始化</el-tag>
+              <span v-else-if="row.active" class="next-run">
                 <el-icon><Clock /></el-icon>
                 {{ row.next_run || '—' }}
               </span>
@@ -187,12 +195,14 @@ const openAddDialog = () => {
   dialogVisible.value = true
 }
 
+const editTaskId = ref('')
 const openEditDialog = (task) => {
   dialogMode.value = 'edit'
+  editTaskId.value = task.task_id || ''
   taskForm.value = {
     name: task.name,
     time: task.time,
-    text: ''
+    text: task.text || ''
   }
   dialogVisible.value = true
 }
@@ -212,7 +222,7 @@ const handleSubmit = async () => {
       await addTask(taskForm.value.time, taskForm.value.name, taskForm.value.text || null)
       ElMessage.success('添加成功')
     } else {
-      await editTask(taskForm.value.name, taskForm.value.time)
+      await editTask(editTaskId.value || taskForm.value.name, taskForm.value.time, taskForm.value.text || null)
       ElMessage.success('修改成功')
     }
     dialogVisible.value = false
@@ -312,4 +322,18 @@ const handleBatchDelete = async () => {
 .next-run .el-icon {
   color: var(--text-3);
 }
+.text-muted {
+  color: var(--text-3);
+}
+
+/* 任务内容可能很长（每日默认内容是整段台词），截断显示，悬停看全文 */
+.task-text {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+
 </style>

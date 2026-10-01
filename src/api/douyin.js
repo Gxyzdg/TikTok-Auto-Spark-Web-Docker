@@ -130,7 +130,8 @@ export const addTask = (time, name, text) => api.post('/Time/add', { time, name,
 export const delTask = (task_id) => api.get('/Time/del', { params: { task_id } })
 
 // 修改定时任务
-export const editTask = (name, new_time) => api.get('/Time/edit', { params: { name, new_time } })
+// 优先用 task_id 精确定位（同一好友可以有多个定时任务）
+export const editTask = (task_id, new_time, text) => api.get('/Time/edit', { params: { task_id, new_time, text } })
 
 // 停用定时任务
 export const pauseTask = (task_id) => api.get('/Time/pause', { params: { task_id } })
