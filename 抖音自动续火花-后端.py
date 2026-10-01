@@ -396,6 +396,76 @@ class Douyin:
             prev = cur
         return prev
 
+    def _editor_text(self):
+        """当前输入框（编辑器）里的文本。"""
+        try:
+            return (driver.execute_script(
+                "const e=document.querySelector('[class*=messageEditorimChatEditorContainer]');"
+                "return e ? (e.innerText||'') : '';") or '').strip()
+        except Exception:
+            return ''
+
+    def _type_message(self, editor, text):
+        """把消息输入到编辑器，并**校验真的输入进去了**。
+
+        返回 (是否成功, 错误信息)。"点击没把焦点给到可编辑节点 / React 编辑器没接受注入内容"
+        导致输入没落地就回车，是发送未生效最常见的原因。
+        """
+        target = (text or '').strip()
+        try:
+            editor.click()
+            time.sleep(0.3)
+        except Exception:
+            pass
+        try:
+            focused = bool(driver.execute_script(
+                "const a=document.activeElement; if(!a) return false;"
+                "return !!(a.isContentEditable || (a.closest && a.closest('[class*=messageEditor]')));"))
+        except Exception:
+            focused = False
+        if not focused:
+            try:
+                driver.execute_script("arguments[0].click(); arguments[0].focus();", editor)
+                time.sleep(0.2)
+            except Exception:
+                pass
+        before_text = self._editor_text()
+        try:
+            editor.send_keys(text)
+        except Exception as e:
+            return False, f'输入失败：{str(e)[:60]}'
+        for _ in range(6):
+            time.sleep(0.5)
+            cur = self._editor_text()
+            if not target or target in cur or (cur and cur != before_text):
+                return True, ''
+        return False, f'输入框未接收文本（编辑器内容仍为"{self._editor_text()[:20]}"）'
+
+    def _clear_editor(self, editor):
+        """清空编辑器（Ctrl+A + Backspace），输入失败重试前先清空，避免内容叠加。"""
+        try:
+            editor.send_keys(Keys.CONTROL, 'a')
+            time.sleep(0.1)
+            editor.send_keys(Keys.BACKSPACE)
+            time.sleep(0.2)
+        except Exception:
+            pass
+
+    def _click_send_button(self):
+        """点击输入框附近的「发送」按钮（回车无效时的备用提交方式）。"""
+        for xp in (
+            '//*[contains(@class,"messageEditor")]//*[contains(@class,"send")]',
+            '//*[contains(@class,"messageEditor")]//*[normalize-space(text())="发送"]',
+            '//*[normalize-space(text())="发送"]',
+        ):
+            try:
+                driver.find_element(By.XPATH, xp).click()
+                time.sleep(0.5)
+                return True
+            except Exception:
+                continue
+        return False
+
     def _recent_my_bubble_texts(self, n=3):
         """最近 n 条"我发出的消息"文本（宽容校验用）。"""
         try:
@@ -529,13 +599,44 @@ class Douyin:
                         before = self._my_message_count()
                     seng = driver.find_element(
                         By.XPATH, value='//div[@class="messageEditorimChatEditorContainer"]/div/div')
-                    seng.click()
-                    time.sleep(0.2)
-                    seng.send_keys(text)
-                    time.sleep(0.2)
-                    seng.send_keys(Keys.ENTER)
 
-                    # ③ 校验消息确实出现在会话里，否则视为失败（不再误报成功）
+                    # ② 输入，并校验输入真的进了输入框（输入没落地就回车 = "发送未生效"最常见原因）
+                    typed, terr = self._type_message(seng, text)
+                    if not typed:
+                        self._clear_editor(seng)
+                        typed, terr = self._type_message(seng, text)      # 清空后再试一次
+                    if not typed:
+                        last_error = terr or '输入框未接收文本'
+                        if attempt == 1:
+                            log(f'⚠️ {last_error}，重试一次 → 好友：{name}')
+                            time.sleep(1.0)
+                            continue
+                        break          # 第二次输入仍失败：不再回车（避免空提交）并保留真实原因
+
+                    # ③ 提交：回车为主，编辑器仍有内容则点「发送」按钮兜底，最多 3 轮
+                    sent_ok = False
+                    for _ in range(3):
+                        try:
+                            seng.send_keys(Keys.ENTER)
+                        except Exception:
+                            pass
+                        if self._wait_message_sent(before, text, timeout=5.0):
+                            sent_ok = True
+                            break
+                        if self._editor_text():          # 还留着内容 → 没提交成功
+                            self._click_send_button()
+                            if self._wait_message_sent(before, text, timeout=4.0):
+                                sent_ok = True
+                                break
+                        else:                            # 输入框已空，可能已提交，再确认一次
+                            if self._wait_message_sent(before, text, timeout=5.0):
+                                sent_ok = True
+                                break
+                            break
+                    if sent_ok:
+                        return TrueString(True, None)
+
+                    # ④ 最终校验（判据从宽）：没通过才算失败
                     if self._wait_message_sent(before, text, timeout=12.0):
                         return TrueString(True, None)
                     try:
@@ -544,7 +645,9 @@ class Douyin:
                     except Exception:
                         cur_cnt, last_txt = None, ''
                     last_error = (f'消息未出现在会话中（发送未生效）'
-                                  f'[基线={before} 当前={cur_cnt} 末条="{last_txt}"]')
+                                  f'[基线={before} 当前={cur_cnt} 末条="{last_txt}" '
+                                  f'输入框残留="{self._editor_text()[:20]}"]')
+                    self._clear_editor(seng)
                     if attempt == 1:
                         log(f'⚠️ 发送校验未通过，重试一次 → 好友：{name}')
                         time.sleep(1.0)
