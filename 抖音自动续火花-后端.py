@@ -222,6 +222,28 @@ class Douyin:
     _FRIEND_AVATAR_SEL = 'img[src*="douyinpic.com"]'
     _FRIEND_STREAK_SEL = '[class*="commonStreaknormalText"]'
 
+    # 发送确认用：给当前渲染的"我的消息"气泡打标记；之后只认"打标记后新出现"的气泡。
+    # 为什么必须打标记：本工具每天发的是**固定文案**（如"记得续火花哦~"），只按
+    # "末条内容 == 本条"判断会把**昨天发的同一条消息**误判成本次发送成功（漏发却不自知）；
+    # 而虚拟列表又让"条数增加"不可靠。打标记后判据才既不放跑漏发、也不误报成功。
+    _TAG_MY_BUBBLES_JS = r"""
+        const els = document.querySelectorAll('[class*="messageMessageBoxisFromMe"]');
+        for (const e of els) { e.setAttribute('data-dsh-seen', '1'); }
+        return els.length;
+    """
+    _NEW_MY_BUBBLES_JS = r"""
+        const n = arguments[0] || 3;
+        const els = document.querySelectorAll('[class*="messageMessageBoxisFromMe"]');
+        const out = [];
+        for (let i = els.length - 1; i >= 0 && out.length < n; i--) {
+          const e = els[i];
+          if (e.getAttribute('data-dsh-seen')) continue;
+          const t = (e.innerText || '').replace(/\s+/g, ' ').trim();
+          if (t) out.push(t);
+        }
+        return out;
+    """
+
     # 一次 JS 调用把整屏会话解析成 [{name, avatar, fire}]：
     # 以"名字元素"为锚点就地向上找整行，再在行内取头像/火花，避免用序号拼 xpath
     # （列表虚拟滚动且按最近消息动态排序，序号会串到别人）。
@@ -466,40 +488,176 @@ class Douyin:
                 continue
         return False
 
+    @staticmethod
+    def _norm_bubble(t):
+        """气泡文本归一化（折叠连续空白），用于内容比对。"""
+        return ' '.join((t or '').split())
+
     def _recent_my_bubble_texts(self, n=3):
-        """最近 n 条"我发出的消息"文本（宽容校验用）。"""
+        """最近 n 条"我发出的消息"文本（从后往前取**非空**的）。
+
+        旧实现是 `els[-n:]` 先切片再过滤空文本：虚拟列表尾部常有空节点，
+        真实末条会被挤出窗口，于是"消息明明在会话里"却校验不到（线上漏判的原因之一）。
+        """
         try:
             els = driver.find_elements(By.XPATH, '//*[contains(@class,"messageMessageBoxisFromMe")]')
             out = []
-            for el in els[-n:]:
-                t = (el.text or '').strip()
+            for el in reversed(els):
+                t = self._norm_bubble(el.text)
                 if t:
                     out.append(t)
+                if len(out) >= n:
+                    break
             return out
         except Exception:
             return []
 
-    def _wait_message_sent(self, before_count, text, timeout=15.0):
-        """确认消息真的进了会话：以"最后一条自己的消息内容 == 本条内容"为主，数量增加为辅。
+    def _tag_my_bubbles(self):
+        """给当前渲染的"我的消息"气泡打标记，返回是否成功（失败则本轮的标记判据自动降级）。"""
+        try:
+            driver.execute_script(self._TAG_MY_BUBBLES_JS)
+            return True
+        except Exception:
+            return False
 
-        历史问题：老实现发完回车直接返回成功；后来改成"条数增加即成功"也不够严谨——
-        新会话的历史消息是异步渲染的，回车后即使没发出去，历史气泡也会让条数从 0 涨上去。
-        因此这里先用 _wait_message_list_stable 拿到稳定基线，再以文本匹配为准。
+    def _new_sent_bubble_texts(self, n=3):
+        """打标记之后**新出现**的自己消息文本（从后往前最多 n 条）。"""
+        try:
+            out = driver.execute_script(self._NEW_MY_BUBBLES_JS, n)
+            return [self._norm_bubble(t) for t in (out or [])]
+        except Exception:
+            return []
+
+    def _reopen_chat(self, name):
+        """切到别的会话再切回来，强制消息区重新渲染（用于复查"慢到的消息"是否其实已送达）。"""
+        try:
+            other = next((x for x in (self.friends_xpath_list or {}) if _norm_name(x) != _norm_name(name)), None)
+            if not other:
+                return False
+            self._click_friend(other)
+            time.sleep(0.8)
+            self._click_friend(name)
+            time.sleep(1.2)
+            self._wait_message_list_stable(3.0)
+            return True
+        except Exception:
+            return False
+
+    def _scroll_chat_to_bottom(self):
+        """把页面里的滚动容器都滚到底（刷新后最新消息可能还没进入渲染区，否则会漏判）。"""
+        try:
+            driver.execute_script(
+                "document.querySelectorAll('*').forEach(function (e) {"
+                "  if (e.scrollHeight > e.clientHeight + 4) e.scrollTop = e.scrollHeight;"
+                "});")
+            time.sleep(1.0)
+            return True
+        except Exception:
+            return False
+
+    def _reload_page(self, timeout=90.0):
+        """刷新整个页面并等会话列表重新就绪（"发送后刷新网页再检测"）。
+
+        刷新的意义：让服务端**重新下发**会话数据，拿到的是服务器上的真实状态，
+        不再依赖前端本地状态与虚拟列表的渲染时机（"发送成功却看不到"多来自后者）。
         """
-        target = (text or '').strip()
+        try:
+            driver.refresh()
+        except Exception as e:
+            log(f'⚠️ 刷新页面失败：{str(e)[:80]}')
+            return False
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            time.sleep(0.5)
+            try:
+                driver.find_element(By.XPATH, '//div[@class="conversationConversationListwrapper"]')
+                return True
+            except Exception:
+                pass
+            try:
+                # 刷新后回到登录页：不必空等，交给登录态监控/看门狗处理
+                driver.find_element(By.XPATH, '//*[@id="douyin_login_comp_flat_panel"]')
+                log('⚠️ 刷新后回到登录页（登录态可能已失效）')
+                return False
+            except Exception:
+                continue
+        log('⚠️ 刷新后会话列表一直没就绪')
+        return False
+
+    def _authoritative_check(self, name, text, base_list):
+        """刷新页面后的权威核对：**本条文案的条数是不是真的多了一条**。
+
+        返回 True=确认已送达 / False=确认未送达 / None=无法判定（刷新失败、窗口对不上）。
+        为什么用条数：本工具每天发固定文案，昨天那条一模一样，只看"末条是不是这句"
+        区分不了今天和昨天；而刷新后 data-dsh-seen 标记也没了，所以改用
+        "发送前最新的 K 条自己的消息" 对比 "刷新后的最新 K 条"，K 取两边较小值——
+        新消息一定排在最前面；条数判断只在"刷新前后渲染范围基本一致"时才下结论，
+        范围对不上就返回 None（无法判定），绝不拿不可比的数据去猜。
+
+        判据：① 条数变多 且 最新一条就是本条 → 已送达；
+              ② 条数没变（真发出去一定会多一条）→ 确认未送达；
+              ③ 其余（条数变少 / 多加载了一条以上）→ 无法判定。
+        """
+        target = self._norm_bubble(text)
+        if not target or not base_list or len(base_list) < 3:
+            return None
+        if not self._reload_page():
+            return None
+        ok, err = self._click_friend(name)
+        if not ok:
+            log(f'⚠️ 刷新后重新打开会话失败：{err}')
+            return None
+        opened = ''
+        for _ in range(12):
+            time.sleep(0.4)
+            opened = self._current_chat_title()
+            if _norm_name(opened) == _norm_name(name):
+                break
+        if _norm_name(opened) != _norm_name(name):
+            log(f'⚠️ 刷新后打开的会话不是该好友（当前：{opened or "无"}）')
+            return None
+        self._scroll_chat_to_bottom()
+        self._wait_message_list_stable(3.0)
+        now = self._recent_my_bubble_texts(30)
+        if len(now) < 3:
+            return None
+        b_hits = sum(1 for t in base_list if t == target)
+        n_hits = sum(1 for t in now if t == target)
+        # 两边渲染范围不同（刷新后多加载/少加载了历史）就不可比，宁可不下结论：
+        # 多出不止一条说明加载范围变了，少一条说明新消息可能被挤出了窗口
+        if len(now) - len(base_list) > 1:
+            return None
+        # 送达：本条文案的条数确实多了一条，且最新的自己消息就是本条
+        if n_hits > b_hits and self._norm_bubble(now[0]) == target:
+            return True
+        # 确认未送达：条数没变（真发出去了一定会多一条）
+        if n_hits == b_hits:
+            return False
+        return None
+
+
+    def _wait_message_sent(self, before_count, text, timeout=15.0, tag_ok=True):
+        """确认本条消息**真的**进了会话（送达优先，但不允许用"昨天那条同文案"蒙混过关）。
+
+        判据（任一成立即算送达，都必须包含"新消息"证据）：
+          ① 打标记后**新出现**的气泡里出现本条内容 —— 最可靠，能区分昨天发的同一句文案；
+          ② 最近 5 条自己的消息里有本条内容 **且** 条数确实比基线多 —— ① 不可用时的兜底。
+
+        已经删掉的两个旧判据（都会把"没发出去"判成成功，直接导致漏发）：
+          · 单凭"条数增加"——虚拟列表重排/历史异步渲染都会让条数变化；
+          · 单凭"末条自己的消息内容 == 本条"——本工具每天发固定文案，昨天那条会被当成今天发成功。
+        """
+        target = self._norm_bubble(text)
+        if not target:
+            return False
         deadline = time.time() + timeout
         while time.time() < deadline:
             time.sleep(0.4)
-            cur = self._my_message_count()
-            # 判据从宽，但必须有：任一成立即算成功
-            #   ① 我发出的消息条数增加（基线在消息区稳定后才取，可靠）
-            #   ② 最后一条自己的消息内容 == 本条内容
-            #   ③ 最近 3 条自己的消息里出现本条内容（应对渲染顺序/气泡拆分）
-            if before_count is not None and cur is not None and cur > before_count:
+            if tag_ok and target in self._new_sent_bubble_texts(5):
                 return True
-            if target:
-                recent = self._recent_my_bubble_texts(3)
-                if recent and any(t == target for t in recent):
+            cur = self._my_message_count()
+            if before_count is not None and cur is not None and cur > before_count:
+                if target in self._recent_my_bubble_texts(5):
                     return True
         return False
 
@@ -568,15 +726,21 @@ class Douyin:
                 return TrueString(False, e)
             if not count:
                 print("⚠️ 更新好友列表失败!")
-                return TrueString(False, '未获取到好友列表（页面未就绪或未登录）')
+                return TrueString(False, '未发送：未获取到好友列表（页面未就绪或未登录）')
 
             last_error = ''
-            # 最多尝试两次：首次失败（常见于聊天区为空 / 会话未切换成功）自动重试一次
+            # 是否已经**执行过提交动作**（回车/点发送按钮）；tag_ok 表示气泡标记是否可用
+            submit_done = False
+            tag_ok = False
+            # 首次发送前"我的消息"最新若干条：刷新核对的对比基线（只取一次，
+            # 这样第 2 次重发后也能看出"到底发出了一条还是两条"）
+            base_list = None
+            # 最多尝试两次：只在**明确没提交过**的失败上重试（好友没找到 / 会话没切换 / 输入没落地）
             for attempt in (1, 2):
                 try:
                     ok, err = self._click_friend(name)
                     if not ok:
-                        last_error = err
+                        last_error = f'未发送：{err}'
                         continue
 
                     # ① 确认右侧真的切到了这位好友，否则会把消息发给别人
@@ -589,7 +753,7 @@ class Douyin:
                         if _norm_name(opened) == _norm_name(name):
                             break
                     if _norm_name(opened) != _norm_name(name):
-                        last_error = f'会话未切换成功（当前打开：{opened or "无"}）'
+                        last_error = f'未发送：会话未切换成功（当前打开：{opened or "无"}）'
                         continue
 
                     # ② 输入并发送（先聚焦输入框，避免聊天区为空时输入落空）
@@ -599,6 +763,11 @@ class Douyin:
                         before = self._my_message_count()
                     seng = driver.find_element(
                         By.XPATH, value='//div[@class="messageEditorimChatEditorContainer"]/div/div')
+                    # 发送前给已渲染的气泡打标记：之后只认"新出现"的气泡，
+                    # 避免把昨天发的同一句文案误判成今天已送达
+                    tag_ok = self._tag_my_bubbles()
+                    if base_list is None:
+                        base_list = self._recent_my_bubble_texts(30)
 
                     # ② 输入，并校验输入真的进了输入框（输入没落地就回车 = "发送未生效"最常见原因）
                     typed, terr = self._type_message(seng, text)
@@ -606,54 +775,83 @@ class Douyin:
                         self._clear_editor(seng)
                         typed, terr = self._type_message(seng, text)      # 清空后再试一次
                     if not typed:
-                        last_error = terr or '输入框未接收文本'
+                        last_error = f'未发送：{terr or "输入框未接收文本"}'
                         if attempt == 1:
                             log(f'⚠️ {last_error}，重试一次 → 好友：{name}')
                             time.sleep(1.0)
                             continue
                         break          # 第二次输入仍失败：不再回车（避免空提交）并保留真实原因
 
-                    # ③ 提交：回车为主，编辑器仍有内容则点「发送」按钮兜底，最多 3 轮
-                    sent_ok = False
-                    for _ in range(3):
-                        try:
-                            seng.send_keys(Keys.ENTER)
-                        except Exception:
-                            pass
-                        if self._wait_message_sent(before, text, timeout=5.0):
-                            sent_ok = True
-                            break
-                        if self._editor_text():          # 还留着内容 → 没提交成功
-                            self._click_send_button()
-                            if self._wait_message_sent(before, text, timeout=4.0):
-                                sent_ok = True
-                                break
-                        else:                            # 输入框已空，可能已提交，再确认一次
-                            if self._wait_message_sent(before, text, timeout=5.0):
-                                sent_ok = True
-                                break
-                            break
-                    if sent_ok:
+                    # ③ 提交：每次调用最多一次回车 + 一次点「发送」按钮
+                    #    （旧实现"最多 3 轮回车"会连发多条，已删除）
+                    submit_done = True
+                    try:
+                        seng.send_keys(Keys.ENTER)
+                    except Exception:
+                        pass
+                    if self._wait_message_sent(before, text, timeout=5.0, tag_ok=tag_ok):
+                        return TrueString(True, None)
+                    left = self._editor_text()
+                    if left and left == (text or '').strip():
+                        # 输入框里仍是这条原文 → 回车确实没提交，点「发送」按钮兜底（只点一次）
+                        self._click_send_button()
+
+                    # ④ 提交后**给足时间**：线上实测有过"消息在 10 秒窗口之后才出现"的情况，
+                    #    过早判失败会导致重发（连发两条）或误报漏发（断火花）
+                    if self._wait_message_sent(before, text, timeout=20.0, tag_ok=tag_ok):
                         return TrueString(True, None)
 
-                    # ④ 最终校验（判据从宽）：没通过才算失败
-                    if self._wait_message_sent(before, text, timeout=12.0):
-                        return TrueString(True, None)
+                    detail = ''
                     try:
-                        cur_cnt = self._my_message_count()
-                        last_txt = (self._last_my_bubble_text() or '')[:20]
-                    except Exception:
-                        cur_cnt, last_txt = None, ''
-                    last_error = (f'消息未出现在会话中（发送未生效）'
-                                  f'[基线={before} 当前={cur_cnt} 末条="{last_txt}" '
+                        detail = (f'[基线={before} 当前={self._my_message_count()} '
+                                  f'新气泡={self._new_sent_bubble_texts(3)} '
+                                  f'末条="{(self._last_my_bubble_text() or "")[:20]}" '
                                   f'输入框残留="{self._editor_text()[:20]}"]')
-                    self._clear_editor(seng)
+                    except Exception:
+                        pass
+
                     if attempt == 1:
-                        log(f'⚠️ 发送校验未通过，重试一次 → 好友：{name}')
+                        # **送达优先**：先复查（含强制重渲染）是否其实已送达；仍不确认才重发。
+                        # 绝不允许因为"校验没看到"就放弃发送——漏发＝断火花，比重复更严重。
+                        if self._wait_message_sent(before, text, timeout=6.0, tag_ok=tag_ok):
+                            return TrueString(True, None)
+                        self._reopen_chat(name)
+                        if self._wait_message_sent(before, text, timeout=6.0, tag_ok=tag_ok):
+                            return TrueString(True, None)
+                        # 权威复查：**刷新页面**让服务端重新下发会话，再核对本条是否真的在会话里。
+                        # 这是"发送后刷新网页再检测"，能把"其实已发出但页面没显示"与"真没发出去"分开。
+                        verdict = self._authoritative_check(name, text, base_list)
+                        if verdict is True:
+                            log(f'✅ 刷新页面后确认已送达（本轮不重发）→ 好友：{name}')
+                            return TrueString(True, None)
+                        if verdict is False:
+                            log(f'⚠️ 刷新页面后确认没有发出去，立即重发一次 → 好友：{name}')
+                        else:
+                            log(f'⚠️ 刷新页面也无法判定，按送达优先重发一次 → 好友：{name}')
                         time.sleep(1.0)
                         continue
+
+                    # 第 2 次仍没确认 → 再刷新核对一次，区分"确实没发出去"和"其实已经发出去了"
+                    verdict = self._authoritative_check(name, text, base_list)
+                    if verdict is True:
+                        log(f'✅ 刷新页面后确认已送达 → 好友：{name}')
+                        return TrueString(True, None)
+                    if verdict is False:
+                        last_error = '未发送：刷新页面核对后确认消息不在会话里'
+                    else:
+                        last_error = ('发送结果未确认（已重发过一次，可能重复也可能未送达，请人工确认）：'
+                                      f'消息未出现在会话中{detail}')
+                    self._clear_editor(seng)
+                    return TrueString(False, last_error)
                 except Exception as e:
-                    last_error = str(e)
+                    if submit_done:
+                        last_error = f'发送结果未确认（可能已发出也可能未发出）：{str(e)[:60]}'
+                        if attempt == 1:
+                            log(f'⚠️ 发送过程异常，按送达优先重发一次 → 好友：{name}')
+                            time.sleep(1.0)
+                            continue
+                        break
+                    last_error = f'未发送：{str(e)[:60]}'
             return TrueString(False, last_error or '发送失败')
 
     def Find_Friends(self, name: str):
@@ -996,21 +1194,27 @@ _load_tasks()
 
 
 # 定时线程
-def _scheduled_send(name, text, _retried=False):
-    """定时任务执行入口：调用发送、**校验发送结果**并输出日志（供 schedule 调度）。
+_MAX_SEND_ATTEMPTS = 3   # 同一任务同一天最多执行次数（1 次原始 + 2 次重试）
 
-    入参保持 (name, text) 形态，与任务持久化/编辑解析逻辑一致；
-    _retried 标记用于"顺延重试一次"，避免无限重试。
+
+def _scheduled_send(name, text, _attempt=0):
+    """定时任务执行入口：调用发送、校验发送结果并输出日志（供 schedule 调度）。
+
+    **送达优先（产品初衷）**：漏发＝断火花，比重复发送严重。因此只要结果不是"确认已送达"，
+    就一定会顺延重试（包括"结果未确认"和"执行异常"）。为避免无限刷屏，
+    同一天最多执行 _MAX_SEND_ATTEMPTS 次。
     """
     preview = (text or '')[:30]
 
     def _later(minutes, why):
-        """顺延重试一次（只重试一次，避免无限循环）。"""
-        if _retried:
-            log(f'❌ 定时任务最终未发送（{why}）→ 好友：{name}')
+        """顺延重试（上限 _MAX_SEND_ATTEMPTS 次），送达优先。"""
+        if _attempt >= _MAX_SEND_ATTEMPTS - 1:
+            log(f'❌ 定时任务最终未送达（{why}）→ 好友：{name}'
+                f'｜已达重试上限（共 {_MAX_SEND_ATTEMPTS} 次），请人工确认')
             return
-        threading.Timer(minutes * 60, lambda: _scheduled_send(name, text, True)).start()
-        log(f'⏳ 定时任务暂缓（{why}）→ 好友：{name}｜已安排 {minutes} 分钟后重试')
+        threading.Timer(minutes * 60, lambda: _scheduled_send(name, text, _attempt + 1)).start()
+        log(f'⏳ 定时任务暂缓（{why}）→ 好友：{name}｜已安排 {minutes} 分钟后重试'
+            f'（第 {_attempt + 2}/{_MAX_SEND_ATTEMPTS} 次）')
 
     # 浏览器未就绪：顺延重试，而不是直接放弃当天（老实现会静默漏发）
     if not (init and _driver_alive()):
@@ -1033,11 +1237,14 @@ def _scheduled_send(name, text, _retried=False):
             return
         reason = str(getattr(out, 'string', '未知'))
         log(f'❌ 定时任务发送失败 → 好友：{name}｜原因：{reason}')
-        # 只有"明确没发出去"的原因才顺延重试；
-        # "消息未出现在会话中"这类**校验不通过**不重试（消息可能已经发出），避免重复发送
-        if any(k in reason for k in ('未切换', '没有找到该好友', '未获取到好友列表', '点击', '输入框')):
+        # 送达优先：明确"未发送"和"结果未确认"都要顺延重试（次数有上限）。
+        # 绝不再用关键词包含判断（'输入框' 曾命中诊断信息"输入框残留="，导致误判与连发）。
+        if reason.startswith('未发送'):
             _later(10, f'发送未生效（{reason[:40]}）')
+        else:
+            _later(15, f'发送结果未确认（{reason[:40]}）')
     except Exception as e:
+        # 送达优先：异常可能发生在提交之前（消息没发出去），因此也要重试
         log(f'❌ 定时任务执行异常 → 好友：{name}｜错误：{e}')
         _later(10, f'执行异常（{str(e)[:40]}）')
 
