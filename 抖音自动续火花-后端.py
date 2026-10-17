@@ -3142,6 +3142,7 @@ def change_password(payload: dict = Body(None), authorization: str = Header(None
     old_password = str(body.get('old_password') or '')
     new_password = str(body.get('new_password') or '')
     new_username = str(body.get('username') or '').strip()
+    renamed = False
     if not _verify_password(old_password, _password_hash):
         return {'code': 400, 'data': '原密码错误'}
     if len(new_password) < 8:
@@ -3160,6 +3161,7 @@ def change_password(payload: dict = Body(None), authorization: str = Header(None
             return {'code': 400, 'data': '用户名只能包含中文、字母、数字、下划线、点或短横线'}
         _config['username'] = new_username
         _ADMIN_USERNAME = new_username
+        renamed = True
         log(f'👤 管理员用户名已更新为 {new_username}')
     _password_hash = _hash_password(new_password)
     _config['password'] = _password_hash
@@ -3173,8 +3175,7 @@ def change_password(payload: dict = Body(None), authorization: str = Header(None
     # 修改密码后使所有已签发的 token 失效，强制重新登录
     with tokens_lock:
         _valid_tokens.clear()
-    name_changed = bool(new_username and new_username == _ADMIN_USERNAME)
-    prefix = '密码与用户名已更新' if name_changed else '密码修改成功'
+    prefix = '密码与用户名已更新' if renamed else '密码修改成功'
     msg = f'{prefix}，请使用新密码重新登录'
     if vnc_ok:
         msg = f'{prefix}（noVNC 密码已同步更新），请使用新密码重新登录'
