@@ -1048,9 +1048,9 @@ def _restart_vnc_server():
         pass
 
 
-def _print_credentials_box(username: str, password: str):
+def _print_credentials_box(username: str, password: str, title: str = ''):
     print('=' * 66)
-    print('🔐 首次启动：已生成一次性管理员密码（Web 后台与 noVNC 通用）')
+    print('🔐 ' + (title or '首次启动：已生成一次性管理员密码（Web 后台与 noVNC 通用）'))
     print(f'   用户名：{username}')
     print(f'   密  码：{password}')
     print('   登录后系统会强制要求修改密码，修改后自动同步到 noVNC。')
@@ -1161,6 +1161,13 @@ def _load_config():
         if _verify_password('123456', password):
             must_change = True
             print('⚠️ 安全提示：检测到管理员密码仍是默认口令 123456，登录后台后将强制要求修改')
+            # 老配置升级：把已知的默认口令同步给 noVNC，保证「Web 与 noVNC 密码一致」（登录后强制改密）
+            if init_pwd != '123456':
+                _write_vnc_password('123456')
+            _print_credentials_box(username, '123456', '当前密码仍是默认口令（登录后强制修改，Web 与 noVNC 通用）')
+        elif must_change and init_pwd and _verify_password(init_pwd, password):
+            # 一次性初始密码还没改：每次启动都重新打印，保证用户随时能从日志里找到（改密后不再打印）
+            _print_credentials_box(username, init_pwd, '一次性初始密码（尚未修改，Web 后台与 noVNC 通用）')
         _config['must_change_password'] = must_change
         if must_change:
             _save_config()
