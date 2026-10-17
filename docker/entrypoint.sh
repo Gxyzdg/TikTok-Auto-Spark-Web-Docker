@@ -35,6 +35,7 @@ else
     echo "=============================================================="
 fi
 export INITIAL_ADMIN_PASSWORD
+export VNC_PASS_FILE
 export ADMIN_USERNAME="${ADMIN_USERNAME:-admin}"
 export VNC_PASSWORD="$INITIAL_ADMIN_PASSWORD"
 # VNC_ENABLED：是否启动 x11vnc/noVNC（默认 1 开启）。
