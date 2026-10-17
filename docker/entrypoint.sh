@@ -6,7 +6,21 @@ export HOST="${HOST:-0.0.0.0}"
 export PORT="${PORT:-9844}"
 export DISPLAY="${DISPLAY:-:99}"
 export CHROME_DRIVER_PATH="${CHROME_DRIVER_PATH:-/usr/bin/chromedriver}"
-VNC_PASSWORD="${VNC_PASSWORD:-123456}"
+# VNC 密码：不再内置弱口令。未设置时生成随机密码并持久化到 /data，
+# 避免 noVNC 变成"谁都能接管抖音会话"的后门。
+if [ -z "${VNC_PASSWORD:-}" ]; then
+    if [ -s /data/.vnc_password ]; then
+        VNC_PASSWORD="$(cat /data/.vnc_password)"
+        echo "[entrypoint] 已从 /data/.vnc_password 读取 VNC 密码"
+    else
+        VNC_PASSWORD="$(head -c 64 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 12)"
+        mkdir -p /data
+        printf '%s' "$VNC_PASSWORD" > /data/.vnc_password
+        chmod 600 /data/.vnc_password 2>/dev/null || true
+        echo "[entrypoint] 🔑 已生成随机 VNC 密码：${VNC_PASSWORD}"
+        echo "[entrypoint]    已保存到容器内 /data/.vnc_password（重建容器后保持不变）"
+    fi
+fi
 # VNC_ENABLED：是否启动 x11vnc/noVNC（默认 1 开启）。
 # 登录向导（/wizard）已内置 CDP 画面串流，可设为 0 彻底关闭 VNC 及其端口。
 VNC_ENABLED="${VNC_ENABLED:-1}"
@@ -14,8 +28,8 @@ VNC_ENABLED="${VNC_ENABLED:-1}"
 # 让首页「前端端口 / API 地址 / noVNC 端口」跟随自定义映射自动变化。
 NOVNC_PORT="${NOVNC_PORT:-6080}"
 if [ "$VNC_PASSWORD" = "123456" ]; then
-    echo "[entrypoint] ⚠️ 安全提醒：VNC 密码仍是默认值 123456。noVNC 能直接看到并操作容器里已登录的抖音，"
-    echo "[entrypoint] ⚠️ 建议在 docker-compose.yml 里改成强密码；若不需要 VNC，把 VNC_ENABLED 设为 0 彻底关闭。"
+    echo "[entrypoint] ⚠️ 安全提醒：VNC 密码仍是弱口令 123456。noVNC 能直接看到并操作容器里已登录的抖音，"
+    echo "[entrypoint] ⚠️ 建议删掉 compose 里的 VNC_PASSWORD（改为自动生成随机密码），或把 VNC_ENABLED 设为 0 彻底关闭。"
 fi
 # 注意：这里**不给默认值**——没映射后端端口时保持为空，前端会隐藏「API 地址」一行
 API_PORT="${API_PORT:-}"
@@ -70,12 +84,16 @@ elif ! command -v x11vnc >/dev/null 2>&1 || ! command -v websockify >/dev/null 2
     VNC_PID=""
     NOVNC_PID=""
 else
-    echo "[entrypoint] 启动 VNC（端口 5900，密码: ${VNC_PASSWORD}）..."
-    x11vnc -display "$DISPLAY" -forever -shared -passwd "$VNC_PASSWORD" -rfbport 5900 -noxdamage >/tmp/x11vnc.log 2>&1 &
+    echo "[entrypoint] 启动 VNC（端口 5900，密码已设置）..."
+    # VNC 不是核心进程（挂在 wait -n 里会让 VNC 一崩就整容器重启循环），
+    # 但它的日志必须进 docker logs，否则画面异常时无从排查。
+    x11vnc -display "$DISPLAY" -forever -shared -passwd "$VNC_PASSWORD" -rfbport 5900 -noxdamage 2>&1 \
+        | sed -u 's/^/[x11vnc] /' &
     VNC_PID=$!
 
     echo "[entrypoint] 启动 noVNC 网页版 VNC（端口 6080 -> 5900，浏览器访问 /vnc.html）..."
-    websockify --web=/usr/share/novnc 0.0.0.0:6080 127.0.0.1:5900 >/tmp/websockify.log 2>&1 &
+    websockify --web=/usr/share/novnc 0.0.0.0:6080 127.0.0.1:5900 2>&1 \
+        | sed -u 's/^/[websockify] /' &
     NOVNC_PID=$!
 fi
 
@@ -100,7 +118,7 @@ cleanup() {
 trap cleanup TERM INT
 
 # 任一核心进程退出（崩溃）则整个容器退出，交给 Docker restart 策略自动拉起。
-# openbox（窗口管理器）不属核心进程：它退出不影响应用运行，若加入 wait 会因它退出导致容器闪退。
-# VNC 关闭时对应 PID 为空，wait -n 会自动忽略。
-wait -n "$BACKEND_PID" "$NGINX_PID" ${VNC_PID:+"$VNC_PID"} ${NOVNC_PID:+"$NOVNC_PID"} "$XVFB_PID"
+# 核心进程只有：后端、nginx、Xvfb。openbox 与 VNC 不参与——它们挂掉不该让整个
+# 容器闪退（否则一次 VNC 启动失败 = 无限重启循环，连定时任务都会一起停摆）。
+wait -n "$BACKEND_PID" "$NGINX_PID" "$XVFB_PID"
 exit $?

@@ -319,13 +319,19 @@ class Douyin:
 
             def grab():
                 try:
-                    return json.loads(driver.execute_script(self._EXTRACT_FRIENDS_JS, wrapper_el) or '[]')
+                    raw = driver.execute_script(self._EXTRACT_FRIENDS_JS, wrapper_el)
+                    if raw is None:
+                        # 页面脚本没返回数据（页面未就绪/结构变化）：必须与"真的没有好友"区分
+                        log('⚠️ 解析会话列表失败：页面脚本未返回数据')
+                        return None
+                    return json.loads(raw or '[]')
                 except Exception as e:
                     log(f'⚠️ 解析会话列表失败：{e}')
                     return None
 
             merged = {}
             script_fail = 0
+            scroll_fail = 0
             for _ in range(40):
                 batch = grab()
                 if batch is None:
@@ -341,8 +347,22 @@ class Douyin:
                         merged[name] = item
                 try:
                     moved = driver.execute_script(scroll_js, wrapper_el)
-                except Exception:
-                    moved = False
+                except Exception as e:
+                    # 滚动失败（典型是 React 重渲染导致 stale element）不能当成"已滚到底"：
+                    # 那会静默返回部分好友列表 → 添加任务时"时好时坏"
+                    scroll_fail += 1
+                    log(f'⚠️ 会话列表滚动失败（第 {scroll_fail} 次）：{type(e).__name__}')
+                    if scroll_fail >= 3:
+                        log('⚠️ 读取好友列表失败：滚动连续异常，返回不完整列表会误导用户，按失败处理')
+                        return None
+                    try:
+                        wrapper_el = driver.find_element(By.XPATH, wrapper_xpath)
+                    except Exception:
+                        pass
+                    time.sleep(0.6)
+                    continue
+                else:
+                    scroll_fail = 0
                 if not moved:
                     # 滚不动了：再抓一轮（可能刚好有新加载的项）后结束
                     time.sleep(0.6)
@@ -366,6 +386,11 @@ class Douyin:
             self.friends_xpath_list.clear()
             for name, item in merged.items():
                 temp_list.append(UserFriendsInfo(name, item.get('avatar') or '', item.get('fire') or ''))
+            # 名字 → 列表项：Find_Friends 的"好友是否存在"判断、以及"换一个好友"兜底都依赖它。
+            # 历史故障：JS 版重写时只 clear 没有重新填充，字典永远为空 →
+            # Find_Friends 里 `name in self.friends_xpath_list` 恒为假 →
+            # /Time/add 一律返回 {'code':404,'data':None}，前端只显示笼统的"请求失败"。
+            self.friends_xpath_list.update(merged)
             self._friends_cache_time = time.time()
             return temp_list
 
@@ -861,9 +886,16 @@ class Douyin:
                 now = time.time()
                 if not self.friends_xpath_list or (now - self._friends_cache_time) > self.FRIENDS_CACHE_TTL:
                     count = self.Updara_FrinderList()
+                    if count is None:
+                        return TrueString(False, '读取好友列表失败：聊天页未就绪，请稍后重试')
                     if not count:
-                        return TrueString(False, '未初始化好友')
-                return TrueString(name in self.friends_xpath_list, None)
+                        return TrueString(False, '好友列表为空（会话列表里没有好友），请先确认抖音登录状态')
+                target = _norm_name(name)
+                if any(_norm_name(n) == target for n in list(self.friends_xpath_list)):
+                    return TrueString(True, None)
+                # 失败必须带可读原因：前端约定 {'code':X,'data':<文案>}，
+                # data 为空时界面只会显示笼统的"请求失败"，用户无从判断。
+                return TrueString(False, f'没有找到好友「{name}」，请刷新好友列表后重试')
             except Exception as e:
                 # 爬取异常转成业务错误返回，避免 500 透传到调用方
                 return TrueString(False, f'好友列表获取失败: {e}')
@@ -919,7 +951,7 @@ app.add_middleware(
 
 # ================= 密码存储（加盐 PBKDF2 + 配置文件持久化） =================
 # 哈希格式: pbkdf2_sha256$迭代次数$盐(hex)$哈希(hex)；默认密码仍为 admin/123456
-_PBKDF2_ITERATIONS = 100_000
+_PBKDF2_ITERATIONS = 600_000  # OWASP 2023 建议值（老哈希带自己的迭代数，仍可校验）
 _password_hash = None  # 当前管理员密码哈希（启动时从配置文件加载）
 
 
@@ -944,6 +976,20 @@ def _verify_password(pwd: str, stored: str) -> bool:
         return False
 
 
+def _maybe_rehash_password(pwd: str):
+    """登录成功后，把用较低迭代次数存的老哈希升级到当前参数。"""
+    global _password_hash
+    try:
+        iterations = int((_password_hash or '').split('$')[1])
+    except Exception:
+        return
+    if 0 < iterations < _PBKDF2_ITERATIONS:
+        _password_hash = _hash_password(pwd)
+        _config['password'] = _password_hash
+        _save_config()
+        print('🔐 已把管理员密码哈希升级到更强参数')
+
+
 # ================= 配置文件持久化（仅存管理员密码哈希） =================
 # 默认脚本同目录 config.json；Docker 镜像内置 CONFIG_FILE=/data/config.json（数据卷持久化）
 CONFIG_FILE = os.environ.get(
@@ -966,6 +1012,10 @@ def _atomic_write_json(path, data):
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
+        try:
+            os.chmod(path, 0o600)  # 内含管理员密码哈希，只让属主读写
+        except Exception:
+            pass
         return True
     except Exception as e:
         print(f'⚠️ 原子写失败 {path}: {e}')
@@ -1010,9 +1060,12 @@ def _load_config():
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 cfg = json.load(f)
+            if not isinstance(cfg, dict):
+                raise ValueError(f'配置顶层应为 JSON 对象，实际是 {type(cfg).__name__}')
         except Exception as e:
-            _config_load_failed = True
             bad = _quarantine_corrupt_file(CONFIG_FILE)
+            # 同任务文件：隔离成功即可安全写新配置，否则改密等操作会静默失效
+            _config_load_failed = bad is None
             print(f'⚠️ 配置文件损坏（已保留为 {bad}）：{e}')
             env_pwd = os.environ.get('ADMIN_PASSWORD', '')
             if env_pwd:
@@ -1023,25 +1076,36 @@ def _load_config():
                 print('✅ 已按环境变量 ADMIN_PASSWORD 重置管理员密码')
                 return
             print('❌ 无法确定管理员密码：请修复配置后重启，或设置环境变量 ADMIN_PASSWORD 重置密码')
-            _password_hash = _hash_password(secrets.token_urlsafe(24))  # 随机口令，避免出现默认口令
+            temp_pwd = secrets.token_urlsafe(12)  # 随机口令，避免出现默认口令
+            _password_hash = _hash_password(temp_pwd)
             _config.clear()
             _config['password'] = _password_hash
             _config['save_session'] = False
+            _save_config()  # 已隔离成功，可以落盘；否则每次重启都换新随机口令
+            print(f'🔑 已生成临时管理员密码：{temp_pwd}（请登录后立即修改；可用 ADMIN_PASSWORD 环境变量重置）')
             return
-            cfg = {}
     # 持久化字段：password（管理员密码哈希）、save_session（是否保存抖音登录数据，默认关闭）
     password = cfg.get('password')
     save_session = bool(cfg.get('save_session', False))
     _config.clear()
     _config['save_session'] = save_session
-    if not password:
-        _password_hash = _hash_password('123456')  # 默认密码 admin/123456
+    env_pwd = os.environ.get('ADMIN_PASSWORD', '').strip()
+    if env_pwd:
+        # 环境变量始终优先：忘记密码时设置它并重启即可重置（老实现只在配置损坏时才读）
+        _password_hash = _hash_password(env_pwd)
+        _config['password'] = _password_hash
+        _save_config()
+        print('✅ 已按环境变量 ADMIN_PASSWORD 设置管理员密码并持久化（账号 admin；可移除该变量）')
+    elif not password:
+        _password_hash = _hash_password('123456')  # 兼容文档：默认密码 admin/123456
         _config['password'] = _password_hash
         _save_config()
         print('✅ 已生成默认管理员密码（admin/123456）加盐哈希并持久化')
     else:
         _config['password'] = password
         _password_hash = password
+        if _verify_password('123456', _password_hash):
+            print('⚠️ 安全提示：当前仍在使用默认管理员密码 admin/123456，请尽快在「设置」里修改')
     print(f'📄 配置文件: {CONFIG_FILE}')
 
 
@@ -1056,10 +1120,20 @@ _valid_tokens = {}
 _last_login_ip = '无'
 
 
+_TOKENS_MAX = 200  # token 上限：超过后淘汰最早过期的，避免字典无界增长
+
+
 def generate_token() -> str:
     token = secrets.token_hex(32)
     expiry = time.time() + TOKEN_TTL_SECONDS
     with tokens_lock:
+        now = time.time()
+        for k in [k for k, v in _valid_tokens.items() if v is None or v < now]:
+            _valid_tokens.pop(k, None)
+        if len(_valid_tokens) >= _TOKENS_MAX:
+            overflow = len(_valid_tokens) - _TOKENS_MAX + 1
+            for k, _ in sorted(_valid_tokens.items(), key=lambda kv: kv[1])[:overflow]:
+                _valid_tokens.pop(k, None)
         _valid_tokens[token] = expiry
     return token
 
@@ -1141,7 +1215,7 @@ def _save_tasks():
     """将当前定时任务（含已停用）原子写回 JSON 文件；须在 tasks_lock 内调用。"""
     if _tasks_load_failed:
         print('⚠️ 任务文件此前读取失败，出于保护拒绝写回（避免用空列表覆盖原文件）')
-        return
+        return False
     data = {
         'scheduled': {task_id: _job_to_meta(job) for task_id, job in scheduled_tasks.items()},
         'paused': dict(paused_tasks),
@@ -1150,6 +1224,8 @@ def _save_tasks():
     }
     if not _atomic_write_json(TASKS_FILE, data):
         print('⚠️ 任务持久化失败')
+        return False
+    return True
 
 
 def _load_tasks():
@@ -1163,12 +1239,17 @@ def _load_tasks():
         paused_tasks.clear()
         paused_tasks.update(data.get('paused', {}))
         _pending_tasks.clear()
+        # 'scheduled' 是启动时待注册的任务，'pending' 是上次注册失败、需要下次再试的任务。
+        # 两个都要读，否则注册失败的任务在重启后会静默消失（写侧一直在写，读侧漏了）。
         _pending_tasks.update(data.get('scheduled', {}))
+        _pending_tasks.update(data.get('pending', {}))
         log(f'📂 已从磁盘恢复 {len(_pending_tasks)} 个定时任务、{len(paused_tasks)} 个已停用任务')
     except Exception as e:
-        _tasks_load_failed = True
         bad = _quarantine_corrupt_file(TASKS_FILE)
-        print(f'⚠️ 任务文件损坏（已保留为 {bad}），本次不覆盖磁盘文件：{e}')
+        # 原文件已改名保留，磁盘上不再有需要保护的内容 → 允许重新写入新文件。
+        # 老实现把标志永久置 True，之后所有 _save_tasks() 都被静默拒绝（任务只在内存里）。
+        _tasks_load_failed = bad is None
+        print(f'⚠️ 任务文件损坏（已保留为 {bad}）：{e}')
 
 
 def _restore_scheduled_tasks():
@@ -1183,7 +1264,7 @@ def _restore_scheduled_tasks():
             continue
         msg = AiqingGongyu_text() if not text else text
         try:
-            job = schedule.every().day.at(play_time).do(_scheduled_send, name, msg)
+            job = schedule.every().day.at(play_time).do(_scheduled_send, name, msg, _task_id=task_id)
             scheduled_tasks[task_id] = job
             del _pending_tasks[task_id]
         except Exception as e:
@@ -1196,14 +1277,39 @@ _load_tasks()
 # 定时线程
 _MAX_SEND_ATTEMPTS = 3   # 同一任务同一天最多执行次数（1 次原始 + 2 次重试）
 
+# 尚未触发的"顺延重试"定时器：task_id -> threading.Timer
+# 删除 / 停用 / 改时间时必须取消，否则任务已经被用户删掉、几分钟后消息还是发了出去。
+_retry_timers = {}
 
-def _scheduled_send(name, text, _attempt=0):
+
+def _cancel_retry_timer(task_id):
+    """取消某任务尚未触发的顺延重试（调用方须持有 tasks_lock）。"""
+    timer = _retry_timers.pop(task_id, None)
+    if timer is not None:
+        timer.cancel()
+        log(f'⏹️ 已取消待重试的顺延任务 → {task_id}')
+
+
+def _scheduled_send(name, text, _attempt=0, _task_id=None):
     """定时任务执行入口：调用发送、校验发送结果并输出日志（供 schedule 调度）。
 
     **送达优先（产品初衷）**：漏发＝断火花，比重复发送严重。因此只要结果不是"确认已送达"，
     就一定会顺延重试（包括"结果未确认"和"执行异常"）。为避免无限刷屏，
     同一天最多执行 _MAX_SEND_ATTEMPTS 次。
     """
+    # 任务可能已被删除 / 停用 / 改时间（task_id 变了）：此时早先排下的顺延重试不应再发消息
+    if _task_id:
+        with tasks_lock:
+            pending = _retry_timers.pop(_task_id, None)
+            still_active = _task_id in scheduled_tasks or _task_id in _pending_tasks
+        if not still_active:
+            log(f'⏹️ 定时任务已删除或停用，跳过本次执行 → 好友：{name}｜任务：{_task_id}')
+            return
+        if pending is not None:
+            # 由"顺延重试"自己触发时 cancel 无事发生；由 schedule 正常触发时则取消旧的挂起重试，
+            # 避免同一次到点被执行两遍（可能连发两条消息）。
+            pending.cancel()
+
     preview = (text or '')[:30]
 
     def _later(minutes, why):
@@ -1212,7 +1318,16 @@ def _scheduled_send(name, text, _attempt=0):
             log(f'❌ 定时任务最终未送达（{why}）→ 好友：{name}'
                 f'｜已达重试上限（共 {_MAX_SEND_ATTEMPTS} 次），请人工确认')
             return
-        threading.Timer(minutes * 60, lambda: _scheduled_send(name, text, _attempt + 1)).start()
+        delay = max(1, int(minutes)) * 60
+        timer = threading.Timer(delay, lambda: _scheduled_send(name, text, _attempt + 1, _task_id))
+        timer.daemon = True   # 进程退出时不要被一个等待中的重试卡住
+        if _task_id:
+            with tasks_lock:
+                old = _retry_timers.pop(_task_id, None)
+                if old is not None:
+                    old.cancel()      # 同一任务只保留最新一个重试，避免叠加
+                _retry_timers[_task_id] = timer
+        timer.start()
         log(f'⏳ 定时任务暂缓（{why}）→ 好友：{name}｜已安排 {minutes} 分钟后重试'
             f'（第 {_attempt + 2}/{_MAX_SEND_ATTEMPTS} 次）')
 
@@ -1412,10 +1527,17 @@ def _reset_driver_state():
     """复位浏览器/登录状态并释放 driver（供 Chrome 崩溃后重建）。"""
     global init, driver, douyin, Login_is_bool
     with init_lock:
+        old_driver = driver
         try:
             with driver_lock:
-                if driver:
-                    driver.quit()
+                if old_driver:
+                    # quit() 可能因 Chromium 僵死永不返回；不能让它一直占着 init_lock+driver_lock
+                    # （否则 Init/ReInit/看门狗以及所有走 driver_lock 的接口全部卡死）
+                    t = threading.Thread(target=old_driver.quit, daemon=True)
+                    t.start()
+                    t.join(timeout=15)
+                    if t.is_alive():
+                        log('⚠️ 关闭浏览器超时（quit 15 秒未返回），改用强制结束进程')
         except Exception:
             pass
         driver = None
@@ -1443,6 +1565,17 @@ def _create_browser_locked():
     """
     global init, driver, douyin, options
 
+    # 兜底：进入创建流程时若还有旧 driver（并发/异常路径遗留），先释放，保证"创建即唯一"
+    if driver is not None:
+        try:
+            with driver_lock:
+                driver.quit()
+        except Exception:
+            pass
+        driver = None
+        douyin = None
+        init = False
+
     try:
         options = unban_config()  # 每次新建，重试初始化不会叠加重复参数
         new_driver = webdriver.Chrome(service=service, options=options) if service else webdriver.Chrome(options=options)
@@ -1464,15 +1597,20 @@ def _create_browser_locked():
             # 用 DOM 轮询确认页面真的可用（登录面板或会话列表出现），最多等 30 秒
             ready = False
             deadline = time.time() + 60
+            probe_err = None
             while time.time() < deadline:
                 try:
-                    if driver.find_elements(By.XPATH, '//div[@class="conversationConversationListwrapper"]') \
-                       or driver.find_elements(By.XPATH, '//*[@id="douyin_login_comp_flat_panel"]'):
+                    # 必须查新实例 new_driver：此刻全局 driver 仍是 None（1532 行才赋值），
+                    # 老代码查全局 driver → AttributeError 被吞 → 每次初始化白等 60 秒
+                    if new_driver.find_elements(By.XPATH, '//div[@class="conversationConversationListwrapper"]') \
+                       or new_driver.find_elements(By.XPATH, '//*[@id="douyin_login_comp_flat_panel"]'):
                         ready = True
                         break
-                except Exception:
-                    pass
+                except Exception as e:
+                    probe_err = e
                 time.sleep(1.0)
+            if probe_err is not None and not ready:
+                log(f'⚠️ 探测页面就绪状态时出错：{type(probe_err).__name__}: {str(probe_err)[:120]}')
             if ready:
                 log('✅ 抖音页面已就绪')
             else:
@@ -1539,8 +1677,10 @@ def ReInit(authorization: str = Header(None)):
         return auth_err
 
     log('🔄 收到「重新初始化浏览器」请求，正在关闭现有浏览器会话…')
-    _reset_driver_state()  # 无论当前是否可用，先彻底释放，再重建
     with init_lock:
+        # reset 与 create 必须在同一个 init_lock 临界区内（RLock 可重入）：
+        # 老实现 reset 在锁外，两个并发 ReInit 会各自 reset 后各建一个浏览器
+        _reset_driver_state()  # 无论当前是否可用，先彻底释放，再重建
         return _create_browser_locked()
 
 
@@ -2039,6 +2179,21 @@ def _set_remote_active(active):
             _last_remote_input_at = time.time()
 
 
+def _claim_remote_session():
+    """原子地占用"远程画面单会话"位（检查 + 占位在同一临界区）。
+
+    老实现先 remote_session_open() 检查、若干 await 之后才 _set_remote_active(True)，
+    两个标签页能同时通过检查 → 双开串流、输入互相打断。
+    """
+    global _remote_control_active, _last_remote_input_at
+    with _remote_control_lock:
+        if _remote_control_active:
+            return False
+        _remote_control_active = True
+        _last_remote_input_at = time.time()
+        return True
+
+
 def remote_session_open():
     """是否有远程画面会话正在连着（严格：用于单会话互斥）。"""
     with _remote_control_lock:
@@ -2289,20 +2444,21 @@ async def ScreenStream(websocket: WebSocket):
     if websockets is None or not (init and _driver_alive()):
         await websocket.close(code=4400)
         return
-    # 空窗防护：签发票据与真正建连之间可能被另一个页面插队，这里再判一次
-    if remote_session_open():
+    # 空窗防护 + 原子占位：签发票据与真正建连之间可能被另一个页面插队，
+    # 而且检查与占位必须一口气完成（中间不能有 await），否则两端都能通过
+    if not _claim_remote_session():
         await websocket.close(code=4409)
         return
 
     ws_url = await asyncio.to_thread(_devtools_ws_url)
     if not ws_url:
+        _set_remote_active(False)
         await websocket.close(code=4404)
         return
 
     await websocket.accept()
     viewport = await asyncio.to_thread(_viewport_info) or {}
     await websocket.send_json({'t': 'ready', 'viewport': viewport})
-    _set_remote_active(True)
     await asyncio.to_thread(_dismiss_browser_dialogs, '远程画面会话开始')
     log('🖥️ 远程画面会话已连接（CDP 串流开始）')
 
@@ -2497,18 +2653,29 @@ def add_time(payload: dict = Body(None), authorization: str = Header(None)):
         if task_id in _pending_tasks:
             return {'code': 400, 'data': f'好友 {name} 在 {play_time} 已有定时任务'}
 
-    temp = douyin.Find_Friends(name)
+    # 快照：require_init() 与这里之间浏览器可能被看门狗/ReInit 重建（douyin 会变成 None）
+    d = douyin
+    if d is None:
+        return {'code': 400, 'data': '浏览器正在重建，请稍后重试'}
+    try:
+        temp = d.Find_Friends(name)
+    except Exception as e:
+        log(f'⚠️ 添加任务时查询好友失败：{type(e).__name__}: {e}')
+        return {'code': 400, 'data': '浏览器正在重建或页面异常，请稍后重试'}
     if not temp.is_bool:
-        return {'code': 404, 'data': temp.string}
+        # 兜底：data 为空时前端只会显示"请求失败"，必须给一句能看懂的话
+        return {'code': 404, 'data': temp.string or f'没有找到好友「{name}」，请刷新好友列表后重试'}
 
     # 原子化：再次去重 + 注册任务 + 持久化
     with tasks_lock:
         if task_id in scheduled_tasks or task_id in paused_tasks or task_id in _pending_tasks:
             return {'code': 400, 'data': f'好友 {name} 在 {play_time} 已有定时任务'}
-        job = schedule.every().day.at(play_time).do(_scheduled_send, name, msg)
+        job = schedule.every().day.at(play_time).do(_scheduled_send, name, msg, _task_id=task_id)
         scheduled_tasks[task_id] = job
-        _save_tasks()
+        saved = _save_tasks()
     log(f'📌 新增定时任务 → 好友：{name}｜时间：{play_time}｜内容：{(msg or "")[:30]}')
+    if not saved:
+        return {'code': 200, 'data': f'已添加定时任务: {play_time}（⚠️ 但写入磁盘失败，重启后会丢失，请检查数据卷权限）', 'task_id': task_id}
     return {'code': 200, 'data': f'已添加定时任务: {play_time}', 'task_id': task_id}
 
 
@@ -2519,6 +2686,7 @@ def del_time(task_id: str, authorization: str = Header(None)):
         return auth_err
     """根据任务ID删除定时任务"""
     with tasks_lock:
+        _cancel_retry_timer(task_id)   # 先掐掉还没触发的顺延重试
         if task_id in scheduled_tasks:
             job = scheduled_tasks[task_id]
             schedule.cancel_job(job)
@@ -2598,7 +2766,7 @@ def edit_time(new_time: str, task_id: str = None, name: str = None, text: str = 
         if target_id in scheduled_tasks:
             old_job = scheduled_tasks[target_id]
             try:
-                new_job = schedule.every().day.at(new_play_time).do(_scheduled_send, real_name, msg)
+                new_job = schedule.every().day.at(new_play_time).do(_scheduled_send, real_name, msg, _task_id=new_task_id)
             except Exception as e:
                 return {'code': 400, 'data': f'修改失败：{str(e)}'}
             schedule.cancel_job(old_job)
@@ -2612,6 +2780,7 @@ def edit_time(new_time: str, task_id: str = None, name: str = None, text: str = 
             meta = _pending_tasks.pop(target_id)
             meta.update({'time': new_play_time, 'name': real_name, 'text': msg})
             _pending_tasks[new_task_id] = meta
+        _cancel_retry_timer(target_id)   # 时间变了，旧 task_id 的重试一律作废
         _save_tasks()
 
     log(f'🕒 修改定时任务时间 → 好友：{real_name}｜{old_time} → {new_play_time}')
@@ -2680,6 +2849,7 @@ def pause_time(task_id: str, authorization: str = Header(None)):
     if auth_err:
         return auth_err
     with tasks_lock:
+        _cancel_retry_timer(task_id)   # 停用后不允许再有顺延重试发消息
         if task_id in _pending_tasks:
             # 还没注册进 schedule（浏览器未初始化）：直接转成"已停用"记录
             paused_tasks[task_id] = dict(_pending_tasks.pop(task_id))
@@ -2724,7 +2894,7 @@ def enable_time(task_id: str, authorization: str = Header(None)):
         text = info.get('text')
         msg = AiqingGongyu_text() if not text else text
         try:
-            job = schedule.every().day.at(play_time).do(_scheduled_send, name, msg)
+            job = schedule.every().day.at(play_time).do(_scheduled_send, name, msg, _task_id=task_id)
         except Exception as e:
             return {'code': 400, 'data': f'启用任务失败: {str(e)}'}
         scheduled_tasks[task_id] = job
@@ -2750,6 +2920,11 @@ def _client_ip(request):
     """
     if request is None:
         return '127.0.0.1'
+    peer = request.client.host if request.client else '127.0.0.1'
+    # 只有"来自本机反向代理（nginx）"的连接才信任 X-Forwarded-For：
+    # 直连后端端口时客户端可任意伪造 XFF，信任它等于废掉"5 次失败锁定"。
+    if peer not in ('127.0.0.1', '::1'):
+        return peer
     xff = (request.headers.get('x-forwarded-for') or '').strip()
     if xff:
         parts = [p.strip() for p in xff.split(',') if p.strip()]
@@ -2766,17 +2941,18 @@ def _is_login_locked(ip):
                     if now - (v[1] if isinstance(v, (list, tuple)) and len(v) > 1 else 0) > _LOGIN_LOCK_WINDOW]:
             _login_attempts.pop(key, None)
         entry = _login_attempts.get(ip)
+        # 全局兜底：与 IP 无关的总失败量过高也锁一段时间，抵御分布式/伪造 IP 的爆破。
+        # 必须放在"本 IP 无记录就 return False"之前，否则新 IP 永远走不到这里（老实现的死代码）。
+        total = sum(int(v[0] or 0) for v in _login_attempts.values() if isinstance(v, (list, tuple)))
+        if total >= _LOGIN_MAX_FAILS * 6:
+            return True
         if not entry:
             return False
         fails, last_ts = entry
         if now - last_ts > _LOGIN_LOCK_WINDOW:
             _login_attempts.pop(ip, None)
             return False
-        if fails >= _LOGIN_MAX_FAILS:
-            return True
-        # 全局兜底：与 IP 无关的总失败量过高也锁一段时间，抵御分布式/伪造 IP 的爆破
-        total = sum(int(v[0] or 0) for v in _login_attempts.values() if isinstance(v, (list, tuple)))
-        return total >= _LOGIN_MAX_FAILS * 6
+        return fails >= _LOGIN_MAX_FAILS
 
 
 def _record_login_fail(ip):
@@ -2788,6 +2964,11 @@ def _record_login_fail(ip):
         else:
             entry[0] += 1
             entry[1] = now
+        # 兜底上限：来源过多时淘汰最久未更新的条目，避免字典无界增长
+        if len(_login_attempts) > 2000:
+            stale = sorted(_login_attempts.items(), key=lambda kv: kv[1][1])[:len(_login_attempts) - 2000]
+            for key, _ in stale:
+                _login_attempts.pop(key, None)
 
 
 @app.post('/Api/Login/Admin')
@@ -2805,6 +2986,7 @@ def admin_login(request: Request, payload: dict = Body(None)):
         with login_attempts_lock:
             _login_attempts.pop(ip, None)
         _last_login_ip = ip
+        _maybe_rehash_password(password)
         token = generate_token()
         return {'code': 200, 'data': token}
     else:
@@ -2844,8 +3026,12 @@ def change_password(payload: dict = Body(None), authorization: str = Header(None
     new_password = str(body.get('new_password') or '')
     if not _verify_password(old_password, _password_hash):
         return {'code': 400, 'data': '原密码错误'}
-    if len(new_password) < 6:
-        return {'code': 400, 'data': '新密码长度至少 6 位'}
+    if len(new_password) < 8:
+        return {'code': 400, 'data': '新密码长度至少 8 位'}
+    if new_password in ('12345678', '123456789', '1234567890', 'password', 'password1', 'admin123', '88888888'):
+        return {'code': 400, 'data': '该密码过于常见，请换一个'}
+    if new_password == old_password:
+        return {'code': 400, 'data': '新密码不能与原密码相同'}
     _password_hash = _hash_password(new_password)
     _config['password'] = _password_hash
     _save_config()  # 持久化到配置文件，后端/容器重启后仍生效

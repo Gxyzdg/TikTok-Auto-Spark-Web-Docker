@@ -232,9 +232,13 @@ import { getLoginStatus, initBrowser, getLoginPng, login, getUsername, changePas
 import { NOVNC_URL } from '../config'
 import { isDark, setTheme } from '../stores/theme'
 import { loginStatus, setLoginStatus, setFriendsList } from '../stores/browser'
+import { useUserStore } from '../stores/user'
+import { useRouter } from 'vue-router'
 import { formatFriendsList } from '../utils/format'
 
 const loginLoading = ref(false)
+const router = useRouter()
+const userStore = useUserStore()
 const refreshLoading = ref(false)
 const checkLoading = ref(false)
 const refreshStatusLoading = ref(false)
@@ -313,8 +317,7 @@ const checkLoginStatus = async () => {
       await fetchUsername()
     }
   } catch (error) {
-    loginStatus.value = false
-    setLoginStatus(false)
+    // 网络/后端异常不能判定成"抖音未登录"，保留上一次状态，错误由拦截器提示
   }
 }
 
@@ -471,11 +474,15 @@ const handleChangePassword = async () => {
   try {
     const res = await changePassword(passwordForm.value.old_password, passwordForm.value.new_password)
     if (res.code === 200) {
-      ElMessage.success('密码修改成功')
+      ElMessage.success(res.data || '密码修改成功')
       passwordDialogVisible.value = false
       passwordForm.value.old_password = ''
       passwordForm.value.new_password = ''
       passwordForm.value.confirm_password = ''
+      // 后端改密后已清空全部 token：立即登出，否则后续请求全部 401、界面像"卡死"
+      userStore.logout()
+      ElMessage.info('请使用新密码重新登录')
+      router.replace('/login')
     }
   } catch (error) {
     // 错误已由响应拦截器统一提示

@@ -97,7 +97,7 @@
             style="width: 100%"
           />
         </el-form-item>
-        <el-form-item v-if="dialogMode === 'add'" label="消息内容">
+        <el-form-item label="消息内容">
           <el-input
             v-model="taskForm.text"
             type="textarea"
@@ -149,9 +149,10 @@ const taskRules = {
 const dialogTitle = computed(() => dialogMode.value === 'add' ? '添加定时任务' : '修改执行时间')
 
 const availableFriends = computed(() => {
-  // 过滤掉已有任务的好友
-  const existingNames = taskList.value.map(t => t.name)
-  return storeFriendsList.value.filter(f => !existingNames.includes(f.name))
+  // 不在前端过滤：后端允许同一好友在不同时间建多个任务（task_id = 时间_好友名），
+  // 按名字过滤会让"给同一好友再加一个时间"完全无法选人。重复的（好友+时间）
+  // 由后端返回可读的中文错误，前端原样提示即可。
+  return storeFriendsList.value
 })
 
 // 页面加载时获取任务列表

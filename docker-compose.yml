@@ -13,8 +13,9 @@ services:
       # 后端端口不映射时**不要**设置 API_PORT，界面会隐藏「API 地址」这一行。
       NOVNC_PORT: "${NOVNC_PORT:-14321}"
       # API_PORT: "9844"             # 仅在上面打开了后端端口映射时才需要
-      # VNC 密码（默认 123456，正式使用前请修改）
-      VNC_PASSWORD: "123456"
+      # VNC 密码：留空则首次启动自动生成随机密码（打印在 docker logs 里，
+      # 并持久化到 /data/.vnc_password）。noVNC 能直接操作已登录的抖音，切勿用弱口令。
+      VNC_PASSWORD: "${VNC_PASSWORD:-}"
       # VNC_ENABLED=0 关闭 x11vnc / noVNC（改用登录向导内置的画面串流）。
       # 带 VNC 的镜像默认 1；「无 VNC」镜像（:1.5.1）已内置为 0，无需在此设置。
       VNC_ENABLED: "1"

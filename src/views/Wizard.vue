@@ -220,7 +220,7 @@ import {
   submitVerifyCode
 } from '../api/douyin'
 import { NOVNC_URL } from '../config'
-import { loginStatus, setLoginStatus, douyinNickname, setDouyinUser } from '../stores/browser'
+import { loginStatus, setLoginStatus, setBrowserStatus, douyinNickname, setDouyinUser } from '../stores/browser'
 
 const router = useRouter()
 const vncUrl = NOVNC_URL
@@ -348,7 +348,7 @@ const stopStream = (silent = false) => {
 }
 
 const startStream = async () => {
-  if (live.value || connecting.value) return
+  if (live.value || connecting.value || ws) return
   if (fallback.value) toggleFallback()   // 与截图模式互斥，避免两个画面源互相覆盖
   const my = ++streamToken
   connecting.value = true
@@ -372,7 +372,11 @@ const startStream = async () => {
       if (socket !== ws) return       // 旧连接的回调不得影响当前连接
       const wasLive = live.value
       stopStream(true)
-      if (ev.code === 4401) {
+      if (my === streamToken) connecting.value = false
+      if (ev.code === 4409) {
+        ElMessage.error('其它页面正在远程连接，同一时间只允许一个远程画面')
+        streamState.value = 'error'
+      } else if (ev.code === 4401) {
         ElMessage.error('连接票据无效或已过期，请重新点击「连接画面」')
         streamState.value = 'error'
       } else if (ev.code === 4400 || ev.code === 4404) {
@@ -384,13 +388,26 @@ const startStream = async () => {
       }
     }
     socket.onerror = () => {
-      if (socket === ws) streamState.value = 'error'
+      if (socket === ws) {
+        streamState.value = 'error'
+        if (my === streamToken) connecting.value = false
+      }
     }
+    // 兜底：建连后迟迟收不到 ready 帧（后端卡住）时放开按钮，允许用户重试
+    setTimeout(() => {
+      if (socket === ws && !live.value) {
+        if (my === streamToken) connecting.value = false
+        streamState.value = 'error'
+        ElMessage.warning('画面连接超时，请重新点击「连接画面」')
+      }
+    }, 15000)
   } catch (e) {
     // 错误提示由响应拦截器统一处理（如"浏览器未初始化"）
     streamState.value = 'error'
   } finally {
-    if (my === streamToken) connecting.value = false
+    // 只有"还没建立 socket"的失败路径才在这里复位；连接成功后交给 ready/onclose 复位，
+    // 否则 ready 帧到达前连接状态已被清空，用户再点一次会建出第二条无人回收的连接
+    if (my === streamToken && !ws) connecting.value = false
   }
 }
 
@@ -399,6 +416,7 @@ const onWsMessage = (ev) => {
     try {
       const msg = JSON.parse(ev.data)
       if (msg.t === 'ready') {
+        connecting.value = false
         live.value = true
         streamState.value = 'live'
         if (msg.viewport) {
@@ -612,6 +630,10 @@ const handleVisibility = () => {
       clearInterval(pollTimer)
       pollTimer = null
     }
+    // 切到后台时停掉画面：否则继续收 JPEG / 每秒截图，既耗流量又长期占住后端
+    // 的远程单会话标志，导致别的标签页连不上
+    stopStream(true)
+    stopFallback()
   } else {
     if (!pollTimer) {
       pollLogin()

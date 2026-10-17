@@ -164,7 +164,7 @@
               <span class="info-label">前端端口</span>
               <span class="info-value">{{ FRONTEND_PORT }}</span>
             </div>
-            <div class="info-item">
+            <div v-if="vncEnabled" class="info-item">
               <span class="info-label">VNC 端口</span>
               <span class="info-value">
                 <a :href="vncUrl" target="_blank" class="vnc-link">
@@ -255,9 +255,10 @@ import { initBrowser as initBrowserApi, reInitBrowser as reInitBrowserApi, getFr
 import { browserStatus, loginStatus, friendsList, douyinNickname, setBrowserStatus, setLoginStatus, setFriendsList, setDouyinUser } from '../stores/browser'
 import FlameIcon from '../components/FlameIcon.vue'
 import { formatFriendsList } from '../utils/format'
-import { APP_VERSION, API_HOST, FRONTEND_PORT, NOVNC_PORT, NOVNC_URL } from '../config'
+import { APP_VERSION, API_HOST, FRONTEND_PORT, NOVNC_PORT, NOVNC_URL, VNC_ENABLED } from '../config'
 
 const router = useRouter()
+const vncEnabled = VNC_ENABLED
 
 // 键盘触发可点击块的点击事件（Enter / Space）
 const onActionKeydown = (e) => {

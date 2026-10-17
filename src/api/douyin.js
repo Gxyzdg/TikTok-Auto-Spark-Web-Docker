@@ -96,7 +96,7 @@ export const getScrlk = () => api.get('/Api/GetScrlk')
 
 // 登录（cookie 即用户粘贴的 Base64Cookie，后端 base64 解码一次即可）
 export const login = async (cookie) => {
-  return api.post('/Api/login', { cooke: cookie })
+  return api.post('/Api/login', { cooke: cookie }, { timeout: 180000 })
 }
 
 // 获取二维码
@@ -106,7 +106,7 @@ export const getLoginPng = () => api.get('/Api/login/Init/GetLoginPng')
 export const dieLogin = () => api.get('/Api/DieLogin')
 
 // 获取Cookie
-export const getCooker = (password) => api.post('/Api/login/Init/GetCooker', { password })
+export const getCooker = (password) => api.post('/Api/login/Init/GetCooker', { password }, { timeout: 120000 })
 
 // 发送验证码
 export const sendVerifyCode = (areacode, phone) => api.get('/Api/LoginPhone', { params: { areacode, phone } })
@@ -118,13 +118,17 @@ export const submitVerifyCode = (code) => api.get('/Api/LoginPhoneInput', { para
 export const logout = () => api.get('/Api/logout')
 
 // 获取好友列表
-export const getFriendsList = () => api.get('/Api/GetFriendsList')
+// 好友列表要滚动整屏并可能重试多轮，耗时可达 1~2 分钟（30s 默认超时会误报失败）
+export const getFriendsList = () => api.get('/Api/GetFriendsList', { timeout: 180000 })
 
 // 发送消息
-export const sendMessage = (name, text) => api.post('/Api/Send', { name, text })
+// 发送含"提交 + 校验 + 必要时刷新页面核对"，慢的时候 1 分钟以上
+export const sendMessage = (name, text) => api.post('/Api/Send', { name, text }, { timeout: 180000 })
 
 // 添加定时任务
-export const addTask = (time, name, text) => api.post('/Time/add', { time, name, text })
+// 加任务可能要读一次好友列表（缓存过期时），同样放宽
+// eslint-disable-next-line max-len
+export const addTask = (time, name, text) => api.post('/Time/add', { time, name, text }, { timeout: 180000 })
 
 // 删除定时任务
 export const delTask = (task_id) => api.get('/Time/del', { params: { task_id } })
