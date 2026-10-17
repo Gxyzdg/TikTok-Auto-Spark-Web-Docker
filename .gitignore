@@ -11,6 +11,7 @@ __pycache__/
 # 运行时持久化的定时任务与配置（含管理员密码哈希）
 tasks.json
 config.json
+.vnc_password
 
 # 本地快照/备份（体积大，不入库）
 backup/

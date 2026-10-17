@@ -10,6 +10,13 @@ const routes = [
     meta: { requiresAuth: false }
   },
   {
+    // 首次登录（一次性随机密码）强制改密页：不套用后台布局
+    path: '/setup',
+    name: 'Setup',
+    component: () => import('../views/Setup.vue'),
+    meta: { requiresAuth: true }
+  },
+  {
     path: '/',
     component: () => import('../views/Layout.vue'),
     meta: { requiresAuth: true },
@@ -68,8 +75,18 @@ router.beforeEach((to, from) => {
   // 需要登录的页面
   if (to.meta.requiresAuth && !userStore.isLoggedIn) {
     return '/login'
-  } else if (to.path === '/login' && userStore.isLoggedIn) {
-    return '/'
+  }
+  if (to.path === '/login' && userStore.isLoggedIn) {
+    return userStore.userInfo.mustChangePassword ? '/setup' : '/'
+  }
+  // 未完成首次改密时，任何后台页面都先回强制改密页
+  if (
+    userStore.isLoggedIn &&
+    userStore.userInfo.mustChangePassword &&
+    to.path !== '/setup' &&
+    to.path !== '/login'
+  ) {
+    return '/setup'
   }
 })
 

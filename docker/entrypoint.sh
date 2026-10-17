@@ -6,30 +6,46 @@ export HOST="${HOST:-0.0.0.0}"
 export PORT="${PORT:-9844}"
 export DISPLAY="${DISPLAY:-:99}"
 export CHROME_DRIVER_PATH="${CHROME_DRIVER_PATH:-/usr/bin/chromedriver}"
-# VNC 密码：不再内置弱口令。未设置时生成随机密码并持久化到 /data，
-# 避免 noVNC 变成"谁都能接管抖音会话"的后门。
-if [ -z "${VNC_PASSWORD:-}" ]; then
-    if [ -s /data/.vnc_password ]; then
-        VNC_PASSWORD="$(cat /data/.vnc_password)"
-        echo "[entrypoint] 已从 /data/.vnc_password 读取 VNC 密码"
-    else
-        VNC_PASSWORD="$(head -c 64 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 12)"
-        mkdir -p /data
-        printf '%s' "$VNC_PASSWORD" > /data/.vnc_password
-        chmod 600 /data/.vnc_password 2>/dev/null || true
-        echo "[entrypoint] 🔑 已生成随机 VNC 密码：${VNC_PASSWORD}"
-        echo "[entrypoint]    已保存到容器内 /data/.vnc_password（重建容器后保持不变）"
-    fi
+# ===== 管理员密码 / noVNC 密码（同一份，统一管理）=====
+#   - 首次启动：自动生成随机一次性口令并打印到 docker logs，登录 Web 后强制修改；
+#   - 用户显式设置 VNC_PASSWORD：以它为准（同时作为 Web 初始密码）；
+#   - 已生成过：从 /data/.vnc_password 读取，重建容器 / 升级镜像后保持不变；
+#   - Web 端改密后，后端会重写该文件并重启 x11vnc，两边密码始终一致。
+VNC_PASS_FILE="${VNC_PASS_FILE:-/data/.vnc_password}"
+INITIAL_ADMIN_PASSWORD=""
+if [ -n "${VNC_PASSWORD:-}" ]; then
+    INITIAL_ADMIN_PASSWORD="$VNC_PASSWORD"
+    mkdir -p "$(dirname "$VNC_PASS_FILE")"
+    printf '%s' "$VNC_PASSWORD" > "$VNC_PASS_FILE"
+    chmod 600 "$VNC_PASS_FILE" 2>/dev/null || true
+    echo "[entrypoint] 已按 VNC_PASSWORD 设置登录密码（Web 后台与 noVNC 通用）"
+elif [ -s "$VNC_PASS_FILE" ]; then
+    INITIAL_ADMIN_PASSWORD="$(cat "$VNC_PASS_FILE")"
+    echo "[entrypoint] 已读取已保存的登录密码（Web 后台与 noVNC 通用）"
+else
+    INITIAL_ADMIN_PASSWORD="$(head -c 64 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 12)"
+    mkdir -p "$(dirname "$VNC_PASS_FILE")"
+    printf '%s' "$INITIAL_ADMIN_PASSWORD" > "$VNC_PASS_FILE"
+    chmod 600 "$VNC_PASS_FILE" 2>/dev/null || true
+    echo "=============================================================="
+    echo "[entrypoint] 🔐 首次启动：已生成一次性管理员密码"
+    echo "[entrypoint]    用户名：${ADMIN_USERNAME:-admin}"
+    echo "[entrypoint]    密  码：${INITIAL_ADMIN_PASSWORD}"
+    echo "[entrypoint]    Web 后台与 noVNC 使用同一密码，登录后必须修改。"
+    echo "=============================================================="
 fi
+export INITIAL_ADMIN_PASSWORD
+export ADMIN_USERNAME="${ADMIN_USERNAME:-admin}"
+export VNC_PASSWORD="$INITIAL_ADMIN_PASSWORD"
 # VNC_ENABLED：是否启动 x11vnc/noVNC（默认 1 开启）。
 # 登录向导（/wizard）已内置 CDP 画面串流，可设为 0 彻底关闭 VNC 及其端口。
 VNC_ENABLED="${VNC_ENABLED:-1}"
 # 对外端口（与 docker-compose 的端口映射保持一致）：仅用于前端界面展示，
 # 让首页「前端端口 / API 地址 / noVNC 端口」跟随自定义映射自动变化。
 NOVNC_PORT="${NOVNC_PORT:-6080}"
-if [ "$VNC_PASSWORD" = "123456" ]; then
-    echo "[entrypoint] ⚠️ 安全提醒：VNC 密码仍是弱口令 123456。noVNC 能直接看到并操作容器里已登录的抖音，"
-    echo "[entrypoint] ⚠️ 建议删掉 compose 里的 VNC_PASSWORD（改为自动生成随机密码），或把 VNC_ENABLED 设为 0 彻底关闭。"
+if [ "$VNC_PASSWORD" = "123456" ] || [ "$VNC_PASSWORD" = "admin" ]; then
+    echo "[entrypoint] ⚠️ 安全提醒：当前密码是弱口令，noVNC 能直接看到并操作容器里已登录的抖音。"
+    echo "[entrypoint] ⚠️ 建议删掉 compose 里的 VNC_PASSWORD，改为自动生成随机密码（VNC_PASSWORD 留空）。"
 fi
 # 注意：这里**不给默认值**——没映射后端端口时保持为空，前端会隐藏「API 地址」一行
 API_PORT="${API_PORT:-}"
@@ -87,8 +103,15 @@ else
     echo "[entrypoint] 启动 VNC（端口 5900，密码已设置）..."
     # VNC 不是核心进程（挂在 wait -n 里会让 VNC 一崩就整容器重启循环），
     # 但它的日志必须进 docker logs，否则画面异常时无从排查。
-    x11vnc -display "$DISPLAY" -forever -shared -passwd "$VNC_PASSWORD" -rfbport 5900 -noxdamage 2>&1 \
-        | sed -u 's/^/[x11vnc] /' &
+    # 守护循环：Web 后台改密后后端会 pkill x11vnc，这里自动用新口令重启，保证两边密码一致。
+    (
+      while :; do
+        x11vnc -display "$DISPLAY" -forever -shared -passwdfile "$VNC_PASS_FILE" -rfbport 5900 -noxdamage 2>&1 \
+            | sed -u 's/^/[x11vnc] /'
+        echo "[entrypoint] x11vnc 已退出，1 秒后重启（改密后重启以加载新口令）"
+        sleep 1
+      done
+    ) &
     VNC_PID=$!
 
     echo "[entrypoint] 启动 noVNC 网页版 VNC（端口 6080 -> 5900，浏览器访问 /vnc.html）..."
@@ -114,6 +137,8 @@ done
 cleanup() {
     echo "[entrypoint] 收到退出信号，清理进程..."
     kill "$BACKEND_PID" "$NGINX_PID" ${VNC_PID:+"$VNC_PID"} ${NOVNC_PID:+"$NOVNC_PID"} "$OPENBOX_PID" "$XVFB_PID" 2>/dev/null || true
+    pkill -x x11vnc 2>/dev/null || true
+    pkill -f "websockify --web" 2>/dev/null || true
 }
 trap cleanup TERM INT
 

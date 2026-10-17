@@ -13,8 +13,8 @@
 
 # ---------- 阶段一：构建前端 ----------
 FROM node:22-alpine AS builder
-# 版本号可构建期注入：带 VNC 版本构建为 v1.5.0，无 VNC 版本构建为 v1.5.1
-ARG APP_VERSION=v1.5.0
+# 版本号可构建期注入（默认当前版本 v1.5.5）
+ARG APP_VERSION=v1.5.5
 ENV VITE_APP_VERSION=${APP_VERSION}
 WORKDIR /build
 COPY package.json package-lock.json ./
@@ -41,7 +41,7 @@ ENV PYTHONUNBUFFERED=1 \
     SCALE_FACTOR=1 \
     VNC_ENABLED=1
 
-# 是否安装 VNC 组件：1 = 带 VNC（默认，:1.5.0）；0 = 无 VNC 精简版（:1.5.1）
+# 是否安装 VNC 组件：1 = 带 VNC（默认）；0 = 无 VNC 精简版
 ARG INSTALL_VNC=1
 # 容器默认是否启用 VNC（可在 docker-compose 里用 VNC_ENABLED 覆盖）
 ARG VNC_ENABLED_DEFAULT=1

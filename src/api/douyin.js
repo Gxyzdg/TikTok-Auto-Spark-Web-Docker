@@ -34,6 +34,14 @@ api.interceptors.response.use(
         }, 1500)
         return Promise.reject(new Error(res.data || '未授权'))
       }
+      if (res && res.code !== undefined && res.code == 4301) {
+        // 首次登录的一次性密码必须先改密：跳转到强制改密页
+        ElMessage.warning(res.data || '请先修改初始密码')
+        if (window.location.pathname !== '/setup') {
+          window.location.replace('/setup')
+        }
+        return Promise.reject(new Error(res.data || '请先修改初始密码'))
+      }
       if (res && res.code !== undefined && res.code != 200 && res.code != '200') {
         ElMessage.error(res.data || res.msg || res.message || '请求失败')
         return Promise.reject(new Error(res.data || '请求失败'))
@@ -167,8 +175,15 @@ export const getScreenTicket = () => api.get('/Api/Screen/Ticket')
 // 获取用户名
 export const getUsername = () => api.get('/Api/GetUsername')
 
-// 修改密码
-export const changePassword = (old_password, new_password) => api.post('/Api/ChangePassword', { old_password, new_password })
+// 修改密码（后端会同步 noVNC 密码）
+export const changePassword = (old_password, new_password, username) =>
+  api.post('/Api/ChangePassword', username ? { old_password, new_password, username } : { old_password, new_password })
+
+// 当前管理员账号信息（含"是否必须先改密"）
+export const getAdminInfo = () => api.get('/Api/GetAdminInfo')
+
+// 修改管理员用户名（需要当前密码）
+export const changeUsername = (password, username) => api.post('/Api/ChangeUsername', { password, username })
 
 // 获取上次登录IP
 export const getLastLoginIP = () => api.get('/Api/GetLastLoginIP')

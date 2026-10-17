@@ -83,6 +83,15 @@
       </template>
       <div class="config-row">
         <div class="config-item">
+          <span class="config-label">管理员用户名</span>
+          <span class="config-value">{{ adminUsername }}</span>
+        </div>
+        <el-button :icon="Edit" @click="openUsernameDialog">
+          修改用户名
+        </el-button>
+      </div>
+      <div class="config-row">
+        <div class="config-item">
           <span class="config-label">上次登录 IP</span>
           <span class="config-value">{{ lastLoginIP }}</span>
         </div>
@@ -90,6 +99,9 @@
           修改密码
         </el-button>
       </div>
+      <p class="switch-hint">
+        密码同时用于 Web 后台与 noVNC，修改后会自动同步；用户名默认 admin，可自定义（2-20 个字符）。
+      </p>
     </el-card>
 
     <!-- 调试功能 -->
@@ -217,6 +229,22 @@
       </template>
     </el-dialog>
 
+    <!-- 修改用户名弹窗 -->
+    <el-dialog v-model="usernameDialogVisible" title="修改用户名" width="400px" destroy-on-close>
+      <el-form :model="usernameForm" label-width="88px">
+        <el-form-item label="新用户名">
+          <el-input v-model="usernameForm.username" maxlength="20" placeholder="2-20 个字符，支持中文/字母/数字" />
+        </el-form-item>
+        <el-form-item label="当前密码">
+          <el-input v-model="usernameForm.password" type="password" show-password placeholder="请输入当前密码确认身份" @keyup.enter="handleChangeUsername" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="usernameDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="handleChangeUsername" :loading="usernameLoading">确认修改</el-button>
+      </template>
+    </el-dialog>
+
     <!-- 截图预览弹窗 -->
     <el-dialog v-model="screenshotPreviewVisible" title="浏览器截图" width="640px" destroy-on-close>
       <img :src="screenshotUrl" alt="浏览器截图" class="screenshot-img" />
@@ -228,7 +256,7 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Key, Refresh, View, Loading, Edit, Lock, Document, SwitchButton, Picture, Message, WarnTriangleFilled, Star, TopRight } from '@element-plus/icons-vue'
-import { getLoginStatus, initBrowser, getLoginPng, login, getUsername, changePassword, getLastLoginIP, getFriendsList, getCooker, pnglogin, getScrlk, dieLogin, sendVerifyCode, submitVerifyCode, forceLogin, getSaveSession, setSaveSession } from '../api/douyin'
+import { getLoginStatus, initBrowser, getLoginPng, login, getUsername, changePassword, changeUsername, getAdminInfo, getLastLoginIP, getFriendsList, getCooker, pnglogin, getScrlk, dieLogin, sendVerifyCode, submitVerifyCode, forceLogin, getSaveSession, setSaveSession } from '../api/douyin'
 import { NOVNC_URL } from '../config'
 import { isDark, setTheme } from '../stores/theme'
 import { loginStatus, setLoginStatus, setFriendsList } from '../stores/browser'
@@ -264,6 +292,10 @@ const passwordForm = ref({
   new_password: '',
   confirm_password: ''
 })
+const adminUsername = ref(userStore.userInfo.username || 'admin')
+const usernameDialogVisible = ref(false)
+const usernameLoading = ref(false)
+const usernameForm = ref({ username: '', password: '' })
 const lastLoginIP = ref(localStorage.getItem('douyin_last_login_ip') || '加载中...')
 const settingsLoaded = ref(localStorage.getItem('douyin_settings_loaded') === '1')
 const cookieDialogVisible = ref(false)
@@ -449,6 +481,38 @@ const handleManualLogin = async () => {
     // 错误已由响应拦截器统一提示
   } finally {
     manualLoading.value = false
+  }
+}
+
+const openUsernameDialog = () => {
+  usernameForm.value = { username: adminUsername.value, password: '' }
+  usernameDialogVisible.value = true
+}
+
+const handleChangeUsername = async () => {
+  if (usernameLoading.value) return
+  const name = (usernameForm.value.username || '').trim()
+  if (!name) {
+    ElMessage.warning('请输入新用户名')
+    return
+  }
+  if (!usernameForm.value.password) {
+    ElMessage.warning('请输入当前密码')
+    return
+  }
+  usernameLoading.value = true
+  try {
+    const res = await changeUsername(usernameForm.value.password, name)
+    if (res.code === 200) {
+      adminUsername.value = name
+      userStore.setUsername(name)
+      usernameDialogVisible.value = false
+      ElMessage.success(res.data || '用户名已更新')
+    }
+  } catch (error) {
+    // 错误已由响应拦截器统一提示
+  } finally {
+    usernameLoading.value = false
   }
 }
 
@@ -680,6 +744,14 @@ const handleLogin = async () => {
 
 onMounted(async () => {
   loadSaveSession()
+  try {
+    const info = await getAdminInfo()
+    if (info.code === 200 && info.data.username) {
+      adminUsername.value = info.data.username
+      userStore.setUsername(info.data.username)
+    }
+  } catch (e) {}
+
   // 首次加载
   if (!settingsLoaded.value) {
     await checkLoginStatus()

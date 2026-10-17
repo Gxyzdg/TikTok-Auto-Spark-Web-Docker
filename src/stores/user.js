@@ -28,12 +28,17 @@ const userInfo = ref(readUserInfo())
       const res = await axios.post('/api/Api/Login/Admin', { username, password })
       if (res.data.code === 200) {
         const newToken = res.data.data
+        const mustChange = !!res.data.must_change_password
         token.value = newToken
-        userInfo.value = { username, loginTime: new Date().toISOString() }
+        userInfo.value = {
+          username: res.data.username || username,
+          loginTime: new Date().toISOString(),
+          mustChangePassword: mustChange
+        }
         localStorage.setItem('token', newToken)
         localStorage.setItem('userInfo', JSON.stringify(userInfo.value))
         axios.defaults.headers.common['Authorization'] = `Bearer ${newToken}`
-        return { success: true, message: '登录成功' }
+        return { success: true, message: mustChange ? '请先设置新密码' : '登录成功', mustChangePassword: mustChange }
       } else {
         return { success: false, message: res.data.data || '登录失败' }
       }
@@ -52,6 +57,22 @@ const userInfo = ref(readUserInfo())
     delete axios.defaults.headers.common['Authorization']
   }
 
+  // 更新本地缓存的用户名（改用户名成功后调用）
+  function setUsername(name) {
+    userInfo.value = { ...userInfo.value, username: name }
+    try {
+      localStorage.setItem('userInfo', JSON.stringify(userInfo.value))
+    } catch (e) {}
+  }
+
+  // 标记"已完成强制改密"
+  function clearMustChangePassword() {
+    userInfo.value = { ...userInfo.value, mustChangePassword: false }
+    try {
+      localStorage.setItem('userInfo', JSON.stringify(userInfo.value))
+    } catch (e) {}
+  }
+
   // 恢复登录状态
   function restoreSession() {
     if (token.value) {
@@ -65,6 +86,8 @@ const userInfo = ref(readUserInfo())
     isLoggedIn,
     login,
     logout,
-    restoreSession
+    restoreSession,
+    setUsername,
+    clearMustChangePassword
   }
 })

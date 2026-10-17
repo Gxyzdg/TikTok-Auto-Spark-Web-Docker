@@ -990,13 +990,72 @@ def _maybe_rehash_password(pwd: str):
         print('🔐 已把管理员密码哈希升级到更强参数')
 
 
-# ================= 配置文件持久化（仅存管理员密码哈希） =================
+# ================= 配置文件持久化（管理员账号 + 密码哈希） =================
 # 默认脚本同目录 config.json；Docker 镜像内置 CONFIG_FILE=/data/config.json（数据卷持久化）
 CONFIG_FILE = os.environ.get(
     'CONFIG_FILE',
     os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
 )
+# noVNC 密码文件：与管理员密码保持同一份明文（x11vnc 只接受明文口令）
+VNC_PASS_FILE = os.environ.get(
+    'VNC_PASS_FILE',
+    os.path.join(os.path.dirname(os.path.abspath(CONFIG_FILE)), '.vnc_password')
+)
 _config = {}
+_ADMIN_USERNAME = 'admin'
+_MUST_CHANGE_PASSWORD = False
+
+# 随机口令字符集：去掉 0/O/1/l/I 等易混字符，方便用户从日志里手抄
+_PWD_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'
+
+
+def _generate_password(length: int = 12) -> str:
+    while True:
+        p = ''.join(secrets.choice(_PWD_ALPHABET) for _ in range(length))
+        if any(c.isdigit() for c in p) and any(c.isalpha() for c in p):
+            return p
+
+
+def _write_vnc_password(pwd: str) -> bool:
+    """把管理员密码同步给 noVNC（x11vnc 只认明文口令文件）。
+
+    Web 后台改密后调用，保证「Web 密码」与「noVNC 密码」始终一致。
+    """
+    try:
+        d = os.path.dirname(os.path.abspath(VNC_PASS_FILE))
+        if d and not os.path.isdir(d):
+            os.makedirs(d, exist_ok=True)
+        tmp = f'{VNC_PASS_FILE}.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            f.write(pwd)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, VNC_PASS_FILE)
+        return True
+    except Exception as e:
+        print(f'⚠️ 同步 noVNC 密码失败（{VNC_PASS_FILE}）：{e}')
+        return False
+
+
+def _restart_vnc_server():
+    """密码变更后让 x11vnc 重新读取口令文件（entrypoint 的守护循环会自动拉起）。"""
+    try:
+        r = subprocess.run(['pkill', '-x', 'x11vnc'], timeout=5, capture_output=True)
+        if r.returncode == 0:
+            print('🔄 已通知 noVNC 重新加载口令')
+    except Exception:
+        pass
+
+
+def _print_credentials_box(username: str, password: str):
+    print('=' * 66)
+    print('🔐 首次启动：已生成一次性管理员密码（Web 后台与 noVNC 通用）')
+    print(f'   用户名：{username}')
+    print(f'   密  码：{password}')
+    print('   登录后系统会强制要求修改密码，修改后自动同步到 noVNC。')
+    print('   忘记密码：设置环境变量 ADMIN_PASSWORD 后重启容器即可重置。')
+    print('=' * 66)
 
 
 def _atomic_write_json(path, data):
@@ -1048,64 +1107,76 @@ def _save_config():
 
 
 def _load_config():
-    """启动时加载配置。
+    """启动时加载/初始化管理员账号配置。
 
-    安全要求：**配置文件损坏时绝不自动重置为默认口令**（老实现会静默把管理员密码改回
-    admin/123456 并落盘，等于把后台交出去）。损坏时保留原文件并禁用写回，只允许用
-    环境变量 ADMIN_PASSWORD 重置。
+    安全要求：
+      1. 配置文件损坏时绝不自动重置为默认口令（老实现会静默改回 admin/123456）；
+      2. 首次启动生成**随机一次性口令**并打印到日志（Web 与 noVNC 共用），强制登录后改密；
+      3. 环境变量 ADMIN_PASSWORD 始终优先（忘记密码的救援通道），且会同步 noVNC。
     """
-    global _password_hash, _config_load_failed
+    global _password_hash, _config_load_failed, _ADMIN_USERNAME, _MUST_CHANGE_PASSWORD
     cfg = {}
+    loaded_ok = False
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 cfg = json.load(f)
             if not isinstance(cfg, dict):
                 raise ValueError(f'配置顶层应为 JSON 对象，实际是 {type(cfg).__name__}')
+            loaded_ok = True
         except Exception as e:
             bad = _quarantine_corrupt_file(CONFIG_FILE)
             # 同任务文件：隔离成功即可安全写新配置，否则改密等操作会静默失效
             _config_load_failed = bad is None
             print(f'⚠️ 配置文件损坏（已保留为 {bad}）：{e}')
-            env_pwd = os.environ.get('ADMIN_PASSWORD', '')
-            if env_pwd:
-                _password_hash = _hash_password(env_pwd)
-                _config.clear()
-                _config['password'] = _password_hash
-                _config['save_session'] = False
-                print('✅ 已按环境变量 ADMIN_PASSWORD 重置管理员密码')
-                return
-            print('❌ 无法确定管理员密码：请修复配置后重启，或设置环境变量 ADMIN_PASSWORD 重置密码')
-            temp_pwd = secrets.token_urlsafe(12)  # 随机口令，避免出现默认口令
-            _password_hash = _hash_password(temp_pwd)
-            _config.clear()
-            _config['password'] = _password_hash
-            _config['save_session'] = False
-            _save_config()  # 已隔离成功，可以落盘；否则每次重启都换新随机口令
-            print(f'🔑 已生成临时管理员密码：{temp_pwd}（请登录后立即修改；可用 ADMIN_PASSWORD 环境变量重置）')
-            return
-    # 持久化字段：password（管理员密码哈希）、save_session（是否保存抖音登录数据，默认关闭）
-    password = cfg.get('password')
+            cfg = {}
+
+    password = cfg.get('password') if loaded_ok else None
+    username = str(cfg.get('username') or '').strip() or 'admin'
     save_session = bool(cfg.get('save_session', False))
+    must_change = bool(cfg.get('must_change_password', False))
+    if not loaded_ok:
+        must_change = True  # 配置损坏 → 新口令必须强制修改
+
     _config.clear()
+    _config['username'] = username
     _config['save_session'] = save_session
+    _ADMIN_USERNAME = username
+
     env_pwd = os.environ.get('ADMIN_PASSWORD', '').strip()
+    init_pwd = os.environ.get('INITIAL_ADMIN_PASSWORD', '').strip()
+
     if env_pwd:
         # 环境变量始终优先：忘记密码时设置它并重启即可重置（老实现只在配置损坏时才读）
         _password_hash = _hash_password(env_pwd)
+        must_change = False
         _config['password'] = _password_hash
+        _config['must_change_password'] = False
         _save_config()
-        print('✅ 已按环境变量 ADMIN_PASSWORD 设置管理员密码并持久化（账号 admin；可移除该变量）')
-    elif not password:
-        _password_hash = _hash_password('123456')  # 兼容文档：默认密码 admin/123456
-        _config['password'] = _password_hash
-        _save_config()
-        print('✅ 已生成默认管理员密码（admin/123456）加盐哈希并持久化')
-    else:
-        _config['password'] = password
+        _write_vnc_password(env_pwd)
+        print('✅ 已按环境变量 ADMIN_PASSWORD 设置管理员密码并持久化（Web 与 noVNC 已同步；可移除该变量）')
+    elif password:
         _password_hash = password
-        if _verify_password('123456', _password_hash):
-            print('⚠️ 安全提示：当前仍在使用默认管理员密码 admin/123456，请尽快在「设置」里修改')
+        _config['password'] = password
+        if _verify_password('123456', password):
+            must_change = True
+            print('⚠️ 安全提示：检测到管理员密码仍是默认口令 123456，登录后台后将强制要求修改')
+        _config['must_change_password'] = must_change
+        if must_change:
+            _save_config()
+            print(f'⏳ 管理员账号 {username} 尚未修改初始密码，登录后台时会强制要求修改')
+    else:
+        # 首次启动（或配置损坏后重建）：随机一次性口令，打印到日志
+        temp_pwd = init_pwd or _generate_password()
+        _password_hash = _hash_password(temp_pwd)
+        must_change = True
+        _config['password'] = _password_hash
+        _config['must_change_password'] = True
+        _save_config()
+        _write_vnc_password(temp_pwd)  # 即使失败也要把口令打出来，否则用户无法登录
+        _print_credentials_box(username, temp_pwd)
+
+    _MUST_CHANGE_PASSWORD = must_change
     print(f'📄 配置文件: {CONFIG_FILE}')
 
 
@@ -1154,12 +1225,15 @@ def remove_token(token: str):
         _valid_tokens.pop(token, None)
 
 
-def require_auth(authorization: str = Header(None)):
+def require_auth(authorization: str = Header(None), allow_pending: bool = False):
     if not authorization or not authorization.startswith('Bearer '):
         return {'code': 401, 'data': '未授权'}
     token = authorization[7:]
     if not verify_token(token):
         return {'code': 401, 'data': '未授权'}
+    # 首次登录（一次性随机口令）必须先改密：除改密/查账号/退出外的接口一律拦截
+    if _MUST_CHANGE_PASSWORD and not allow_pending:
+        return {'code': 4301, 'data': '首次登录需要先修改初始密码'}
     return None
 
 
@@ -2982,16 +3056,58 @@ def admin_login(request: Request, payload: dict = Body(None)):
     if _is_login_locked(ip):
         return {'code': 429, 'data': f'登录失败次数过多，请 {_LOGIN_LOCK_WINDOW // 60} 分钟后再试'}
 
-    if username == 'admin' and _verify_password(password, _password_hash):
+    if username == _ADMIN_USERNAME and _verify_password(password, _password_hash):
         with login_attempts_lock:
             _login_attempts.pop(ip, None)
         _last_login_ip = ip
         _maybe_rehash_password(password)
         token = generate_token()
-        return {'code': 200, 'data': token}
+        return {
+            'code': 200,
+            'data': token,
+            'username': _ADMIN_USERNAME,
+            'must_change_password': _MUST_CHANGE_PASSWORD,
+        }
     else:
         _record_login_fail(ip)
-        return {'code': 400, 'data': '登录失败'}
+        return {'code': 400, 'data': '用户名或密码错误'}
+
+
+@app.get('/Api/GetAdminInfo')
+def get_admin_info(authorization: str = Header(None)):
+    """当前管理员账号信息（允许在"待改密"状态下调用，供强制改密页使用）。"""
+    auth_err = require_auth(authorization, allow_pending=True)
+    if auth_err:
+        return auth_err
+    return {'code': 200, 'data': {
+        'username': _ADMIN_USERNAME,
+        'must_change_password': _MUST_CHANGE_PASSWORD,
+    }}
+
+
+@app.post('/Api/ChangeUsername')
+def change_username(payload: dict = Body(None), authorization: str = Header(None)):
+    """修改管理员用户名（需要当前密码确认）。"""
+    auth_err = require_auth(authorization)
+    if auth_err:
+        return auth_err
+    global _ADMIN_USERNAME
+    body = payload or {}
+    password = str(body.get('password') or '')
+    new_name = str(body.get('username') or '').strip()
+    if not _verify_password(password, _password_hash):
+        return {'code': 400, 'data': '密码错误，无法修改用户名'}
+    if not (2 <= len(new_name) <= 20):
+        return {'code': 400, 'data': '用户名长度需在 2-20 个字符之间'}
+    if not re.fullmatch(r'[\w.\-]+', new_name, re.UNICODE):
+        return {'code': 400, 'data': '用户名只能包含中文、字母、数字、下划线、点或短横线'}
+    if new_name == _ADMIN_USERNAME:
+        return {'code': 400, 'data': '新用户名与当前用户名相同'}
+    _ADMIN_USERNAME = new_name
+    _config['username'] = new_name
+    _save_config()
+    log(f'👤 管理员用户名已更新为 {new_name}')
+    return {'code': 200, 'data': f'用户名已更新为 {new_name}'}
 
 
 @app.get('/Api/GetLastLoginIP')
@@ -3005,7 +3121,7 @@ def get_last_login_ip(authorization: str = Header(None)):
 # 退出登录
 @app.get('/Api/logout')
 def logout(authorization: str = Header(None)):
-    auth_err = require_auth(authorization)
+    auth_err = require_auth(authorization, allow_pending=True)
     if auth_err:
         return auth_err
     token = authorization[7:]
@@ -3017,28 +3133,54 @@ def logout(authorization: str = Header(None)):
 # 密码修改
 @app.post('/Api/ChangePassword')
 def change_password(payload: dict = Body(None), authorization: str = Header(None)):
-    auth_err = require_auth(authorization)
+    # allow_pending：强制改密页本身必须能改密
+    auth_err = require_auth(authorization, allow_pending=True)
     if auth_err:
         return auth_err
-    global _password_hash
+    global _password_hash, _MUST_CHANGE_PASSWORD, _ADMIN_USERNAME
     body = payload or {}
     old_password = str(body.get('old_password') or '')
     new_password = str(body.get('new_password') or '')
+    new_username = str(body.get('username') or '').strip()
     if not _verify_password(old_password, _password_hash):
         return {'code': 400, 'data': '原密码错误'}
     if len(new_password) < 8:
         return {'code': 400, 'data': '新密码长度至少 8 位'}
+    if len(new_password) > 64:
+        return {'code': 400, 'data': '新密码长度不能超过 64 位'}
     if new_password in ('12345678', '123456789', '1234567890', 'password', 'password1', 'admin123', '88888888'):
         return {'code': 400, 'data': '该密码过于常见，请换一个'}
     if new_password == old_password:
         return {'code': 400, 'data': '新密码不能与原密码相同'}
+    # 首次设置时允许与改密一起改用户名（一次请求原子完成，避免改完密码 token 失效导致用户名改不了）
+    if new_username and new_username != _ADMIN_USERNAME:
+        if not (2 <= len(new_username) <= 20):
+            return {'code': 400, 'data': '用户名长度需在 2-20 个字符之间'}
+        if not re.fullmatch(r'[\w.\-]+', new_username, re.UNICODE):
+            return {'code': 400, 'data': '用户名只能包含中文、字母、数字、下划线、点或短横线'}
+        _config['username'] = new_username
+        _ADMIN_USERNAME = new_username
+        log(f'👤 管理员用户名已更新为 {new_username}')
     _password_hash = _hash_password(new_password)
     _config['password'] = _password_hash
+    _MUST_CHANGE_PASSWORD = False
+    _config['must_change_password'] = False
     _save_config()  # 持久化到配置文件，后端/容器重启后仍生效
+    # 同步 noVNC：x11vnc 只认明文口令文件，改密后立即重写并让它重启读取
+    vnc_ok = _write_vnc_password(new_password)
+    if vnc_ok:
+        _restart_vnc_server()
     # 修改密码后使所有已签发的 token 失效，强制重新登录
     with tokens_lock:
         _valid_tokens.clear()
-    return {'code': 200, 'data': '密码修改成功，请重新登录'}
+    name_changed = bool(new_username and new_username == _ADMIN_USERNAME)
+    prefix = '密码与用户名已更新' if name_changed else '密码修改成功'
+    msg = f'{prefix}，请使用新密码重新登录'
+    if vnc_ok:
+        msg = f'{prefix}（noVNC 密码已同步更新），请使用新密码重新登录'
+    else:
+        msg = f'{prefix}，但 noVNC 密码同步失败，请重启容器；请使用新密码重新登录'
+    return {'code': 200, 'data': msg}
 
 
 def _startup_restore():
