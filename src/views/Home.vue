@@ -82,31 +82,44 @@
           <div class="action-grid">
             <div
               class="action-item"
-              :class="{ loading: initLoading }"
               tabindex="0"
               role="button"
-              @click="initBrowser"
+              @click="router.push('/friends')"
               @keydown.enter="onActionKeydown"
               @keydown.space.prevent="onActionKeydown"
             >
-              <div class="action-icon browser"><el-icon><Monitor /></el-icon></div>
+              <div class="action-icon friends"><el-icon><User /></el-icon></div>
               <div class="action-text">
-                <span class="action-name">初始化浏览器</span>
-                <span class="action-hint">启动自动化环境</span>
+                <span class="action-name">打开好友列表</span>
+                <span class="action-hint">查看好友与火花状态</span>
               </div>
             </div>
             <div
               class="action-item"
               tabindex="0"
               role="button"
-              @click="refreshFriends"
+              @click="router.push('/tasks')"
               @keydown.enter="onActionKeydown"
               @keydown.space.prevent="onActionKeydown"
             >
-              <div class="action-icon refresh"><el-icon><Refresh /></el-icon></div>
+              <div class="action-icon tasks"><el-icon><Clock /></el-icon></div>
               <div class="action-text">
-                <span class="action-name">刷新好友列表</span>
-                <span class="action-hint">更新好友数据</span>
+                <span class="action-name">管理定时任务</span>
+                <span class="action-hint">添加、修改或停用任务</span>
+              </div>
+            </div>
+            <div
+              class="action-item"
+              tabindex="0"
+              role="button"
+              @click="router.push('/wizard')"
+              @keydown.enter="onActionKeydown"
+              @keydown.space.prevent="onActionKeydown"
+            >
+              <div class="action-icon wizard"><el-icon><Connection /></el-icon></div>
+              <div class="action-text">
+                <span class="action-name">进入登录向导</span>
+                <span class="action-hint">扫码登录与二次验证</span>
               </div>
             </div>
             <div
@@ -121,21 +134,7 @@
               <div class="action-icon reinit"><el-icon><RefreshRight /></el-icon></div>
               <div class="action-text">
                 <span class="action-name">重新初始化浏览器</span>
-                <span class="action-hint">卡死/异常时重建</span>
-              </div>
-            </div>
-            <div
-              class="action-item"
-              tabindex="0"
-              role="button"
-              @click="router.push('/tasks')"
-              @keydown.enter="onActionKeydown"
-              @keydown.space.prevent="onActionKeydown"
-            >
-              <div class="action-icon tasks"><el-icon><Clock /></el-icon></div>
-              <div class="action-text">
-                <span class="action-name">管理定时任务</span>
-                <span class="action-hint">添加或修改任务</span>
+                <span class="action-hint">卡死或异常时重建环境</span>
               </div>
             </div>
           </div>
@@ -244,6 +243,7 @@ import {
   Monitor,
   Clock,
   Key,
+  Connection,
   User,
   Operation,
   InfoFilled,
@@ -251,7 +251,7 @@ import {
   ArrowRight,
   TopRight
 } from '@element-plus/icons-vue'
-import { initBrowser as initBrowserApi, reInitBrowser as reInitBrowserApi, getFriendsList, getTaskList, getHome, getStatus, getUserInfo } from '../api/douyin'
+import { reInitBrowser as reInitBrowserApi, getFriendsList, getTaskList, getHome, getStatus, getUserInfo } from '../api/douyin'
 import { browserStatus, loginStatus, friendsList, douyinNickname, setBrowserStatus, setLoginStatus, setFriendsList, setDouyinUser } from '../stores/browser'
 import FlameIcon from '../components/FlameIcon.vue'
 import { formatFriendsList } from '../utils/format'
@@ -268,7 +268,6 @@ const onActionKeydown = (e) => {
 const friendsCount = ref(0)
 const taskCount = ref(0)
 const recentTasks = ref([])
-const initLoading = ref(false)
 const reinitLoading = ref(false)
 const uptime = ref('--')
 const refreshing = ref(false)
@@ -393,36 +392,6 @@ const loadTaskList = async () => {
     recentTasks.value = [...scheduled, ...unscheduled].slice(0, 5)
   } catch (error) {
     console.error('加载任务列表失败:', error)
-  }
-}
-
-const initBrowser = async () => {
-  initLoading.value = true
-  try {
-    const res = await initBrowserApi()
-    if (res.code === 200) {
-      browserStatus.value = true
-      setBrowserStatus(true)
-      if (res.data === 'init Repeated!') {
-        ElMessage.info('浏览器已在运行中，无需重复初始化')
-      } else {
-        ElMessage.success('浏览器初始化成功')
-      }
-      await checkStatus()
-      if (!loginStatus.value) {
-        ElMessageBox.confirm('浏览器初始化成功，但您还未登录抖音账号，是否前往登录？', '提示', {
-          confirmButtonText: '前往登录',
-          cancelButtonText: '稍后',
-          type: 'warning'
-        }).then(() => {
-          router.push('/settings')
-        }).catch(() => {})
-      }
-    }
-  } catch (error) {
-    // 错误提示已由响应拦截器统一处理
-  } finally {
-    initLoading.value = false
   }
 }
 
@@ -772,8 +741,8 @@ onUnmounted(() => {
   font-size: 18px;
 }
 
-.action-icon.browser { color: var(--primary); background: color-mix(in srgb, var(--primary) 12%, transparent); }
-.action-icon.refresh { color: var(--info); background: color-mix(in srgb, var(--info) 12%, transparent); }
+.action-icon.friends { color: var(--info); background: color-mix(in srgb, var(--info) 12%, transparent); }
+.action-icon.wizard { color: var(--primary); background: color-mix(in srgb, var(--primary) 12%, transparent); }
 .action-icon.reinit { color: var(--slate); background: color-mix(in srgb, var(--slate) 14%, transparent); }
 .action-icon.tasks { color: var(--success); background: color-mix(in srgb, var(--success) 12%, transparent); }
 
