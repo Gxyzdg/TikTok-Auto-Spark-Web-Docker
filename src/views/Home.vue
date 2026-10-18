@@ -383,7 +383,14 @@ const loadTaskList = async () => {
     const res = await getTaskList()
     taskCount.value = res.data.count || 0
     animateCount(tasksDisplay.value, taskCount.value, 700, v => (tasksDisplay.value = v))
-    recentTasks.value = res.data.tasks?.slice(0, 5) || []
+    // 「最近」应是最先执行的 5 个任务：按下次执行时间升序，而不是任务列表的前 5 条。
+    // next_run 为空的（浏览器未初始化 / 等待注册）排在后面，不影响已排期的顺序。
+    const allTasks = res.data.tasks || []
+    const scheduled = allTasks
+      .filter(t => t.active && t.next_run)
+      .sort((a, b) => String(a.next_run).localeCompare(String(b.next_run)))
+    const unscheduled = allTasks.filter(t => t.active && !t.next_run)
+    recentTasks.value = [...scheduled, ...unscheduled].slice(0, 5)
   } catch (error) {
     console.error('加载任务列表失败:', error)
   }
