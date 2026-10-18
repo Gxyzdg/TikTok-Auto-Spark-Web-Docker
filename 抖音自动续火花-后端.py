@@ -996,17 +996,36 @@ CONFIG_FILE = os.environ.get(
     'CONFIG_FILE',
     os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
 )
-# noVNC 密码文件：与管理员密码保持同一份明文（x11vnc 只接受明文口令）
-VNC_PASS_FILE = os.environ.get(
-    'VNC_PASS_FILE',
-    os.path.join(os.path.dirname(os.path.abspath(CONFIG_FILE)), '.vnc_password')
+# 管理员明文口令文件：Web 后台与 noVNC 共用同一份（x11vnc 只接受明文口令）
+PASSWORD_FILE = (
+    os.environ.get('PASSWORD_FILE')
+    or os.environ.get('VNC_PASS_FILE')  # 兼容旧变量名
+    or os.path.join(os.path.dirname(os.path.abspath(CONFIG_FILE)), '.password')
 )
+# 兼容旧文件名：只有旧文件时自动迁移，保证升级后口令不丢
+_LEGACY_PASSWORD_FILE = os.path.join(os.path.dirname(os.path.abspath(CONFIG_FILE)), '.vnc_password')
+if not os.path.exists(PASSWORD_FILE) and os.path.exists(_LEGACY_PASSWORD_FILE):
+    try:
+        os.replace(_LEGACY_PASSWORD_FILE, PASSWORD_FILE)
+        print(f'🔑 已把旧口令文件 .vnc_password 迁移为 {PASSWORD_FILE}')
+    except Exception as e:
+        print(f'⚠️ 旧口令文件迁移失败（{e}），将继续使用旧路径')
+        PASSWORD_FILE = _LEGACY_PASSWORD_FILE
 _config = {}
 _ADMIN_USERNAME = 'admin'
 _MUST_CHANGE_PASSWORD = False
 
 # 随机口令字符集：去掉 0/O/1/l/I 等易混字符，方便用户从日志里手抄
 _PWD_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'
+
+# 常见弱口令：环境变量 PASSWORD 与后台改密时都拒绝
+_COMMON_PASSWORDS = {'12345678', '123456789', '1234567890', 'password', 'password1', 'admin123', '88888888'}
+_PASSWORD_MIN_LEN = 8
+_PASSWORD_MAX_LEN = 64
+
+
+def _password_is_strong(pwd: str) -> bool:
+    return _PASSWORD_MIN_LEN <= len(pwd) <= _PASSWORD_MAX_LEN and pwd not in _COMMON_PASSWORDS
 
 
 def _generate_password(length: int = 12) -> str:
@@ -1016,25 +1035,25 @@ def _generate_password(length: int = 12) -> str:
             return p
 
 
-def _write_vnc_password(pwd: str) -> bool:
-    """把管理员密码同步给 noVNC（x11vnc 只认明文口令文件）。
+def _write_password_file(pwd: str) -> bool:
+    """把管理员密码写入明文口令文件（Web 后台与 noVNC 共用）。
 
     Web 后台改密后调用，保证「Web 密码」与「noVNC 密码」始终一致。
     """
     try:
-        d = os.path.dirname(os.path.abspath(VNC_PASS_FILE))
+        d = os.path.dirname(os.path.abspath(PASSWORD_FILE))
         if d and not os.path.isdir(d):
             os.makedirs(d, exist_ok=True)
-        tmp = f'{VNC_PASS_FILE}.tmp'
+        tmp = f'{PASSWORD_FILE}.tmp'
         with open(tmp, 'w', encoding='utf-8') as f:
             f.write(pwd)
             f.flush()
             os.fsync(f.fileno())
         os.chmod(tmp, 0o600)
-        os.replace(tmp, VNC_PASS_FILE)
+        os.replace(tmp, PASSWORD_FILE)
         return True
     except Exception as e:
-        print(f'⚠️ 同步 noVNC 密码失败（{VNC_PASS_FILE}）：{e}')
+        print(f'⚠️ 同步 noVNC 密码失败（{PASSWORD_FILE}）：{e}')
         return False
 
 
@@ -1048,13 +1067,16 @@ def _restart_vnc_server():
         pass
 
 
-def _print_credentials_box(username: str, password: str, title: str = ''):
+def _print_credentials_box(username: str, password: str, title: str = '', must_change: bool = True):
     print('=' * 66)
     print('🔐 ' + (title or '首次启动：已生成一次性管理员密码（Web 后台与 noVNC 通用）'))
     print(f'   用户名：{username}')
     print(f'   密  码：{password}')
-    print('   登录后系统会强制要求修改密码，修改后自动同步到 noVNC。')
-    print('   忘记密码：设置环境变量 ADMIN_PASSWORD 后重启容器即可重置。')
+    if must_change:
+        print('   登录后系统会强制要求修改密码，修改后自动同步到 noVNC。')
+    else:
+        print('   Web 后台与 noVNC 使用同一密码，修改后自动同步。')
+    print('   忘记密码：设置环境变量 PASSWORD 后重启容器即可重置。')
     print('=' * 66)
 
 
@@ -1143,18 +1165,30 @@ def _load_config():
     _config['save_session'] = save_session
     _ADMIN_USERNAME = username
 
-    env_pwd = os.environ.get('ADMIN_PASSWORD', '').strip()
+    # PASSWORD 是新的统一变量名（Web + noVNC）；ADMIN_PASSWORD 保留为兼容别名。
+    admin_pwd_env = os.environ.get('ADMIN_PASSWORD', '').strip()
+    env_pwd = admin_pwd_env or os.environ.get('PASSWORD', '').strip()
+    if env_pwd and not admin_pwd_env and not _password_is_strong(env_pwd):
+        # PASSWORD 需求：只有符合强度要求才沿用，否则忽略（entrypoint 也会先拦一次）
+        print(f'⚠️ 环境变量 PASSWORD 不符合要求（{_PASSWORD_MIN_LEN}-{_PASSWORD_MAX_LEN} 位且非弱口令），已忽略')
+        env_pwd = ''
     init_pwd = os.environ.get('INITIAL_ADMIN_PASSWORD', '').strip()
+    had_password = bool(password)
 
     if env_pwd:
-        # 环境变量始终优先：忘记密码时设置它并重启即可重置（老实现只在配置损坏时才读）
+        # 环境变量始终优先：设置后 Web 与 noVNC 都用它（可在忘记密码时重置）
         _password_hash = _hash_password(env_pwd)
         must_change = False
         _config['password'] = _password_hash
         _config['must_change_password'] = False
         _save_config()
-        _write_vnc_password(env_pwd)
-        print('✅ 已按环境变量 ADMIN_PASSWORD 设置管理员密码并持久化（Web 与 noVNC 已同步；可移除该变量）')
+        _write_password_file(env_pwd)
+        src = 'ADMIN_PASSWORD' if admin_pwd_env else 'PASSWORD'
+        print(f'✅ 已按环境变量 {src} 设置管理员密码并持久化（Web 与 noVNC 已同步；可移除该变量）')
+        if not had_password:
+            _print_credentials_box(username, env_pwd,
+                                   f'已采用环境变量 {src} 设置的管理员密码（Web 后台与 noVNC 通用）',
+                                   must_change=False)
     elif password:
         _password_hash = password
         _config['password'] = password
@@ -1163,7 +1197,7 @@ def _load_config():
             print('⚠️ 安全提示：检测到管理员密码仍是默认口令 123456，登录后台后将强制要求修改')
             # 老配置升级：把已知的默认口令同步给 noVNC，保证「Web 与 noVNC 密码一致」（登录后强制改密）
             if init_pwd != '123456':
-                _write_vnc_password('123456')
+                _write_password_file('123456')
             _print_credentials_box(username, '123456', '当前密码仍是默认口令（登录后强制修改，Web 与 noVNC 通用）')
         elif must_change and init_pwd and _verify_password(init_pwd, password):
             # 一次性初始密码还没改：每次启动都重新打印，保证用户随时能从日志里找到（改密后不再打印）
@@ -1180,7 +1214,7 @@ def _load_config():
         _config['password'] = _password_hash
         _config['must_change_password'] = True
         _save_config()
-        _write_vnc_password(temp_pwd)  # 即使失败也要把口令打出来，否则用户无法登录
+        _write_password_file(temp_pwd)  # 即使失败也要把口令打出来，否则用户无法登录
         _print_credentials_box(username, temp_pwd)
 
     _MUST_CHANGE_PASSWORD = must_change
@@ -3156,7 +3190,7 @@ def change_password(payload: dict = Body(None), authorization: str = Header(None
         return {'code': 400, 'data': '新密码长度至少 8 位'}
     if len(new_password) > 64:
         return {'code': 400, 'data': '新密码长度不能超过 64 位'}
-    if new_password in ('12345678', '123456789', '1234567890', 'password', 'password1', 'admin123', '88888888'):
+    if new_password in _COMMON_PASSWORDS:
         return {'code': 400, 'data': '该密码过于常见，请换一个'}
     if new_password == old_password:
         return {'code': 400, 'data': '新密码不能与原密码相同'}
@@ -3176,7 +3210,7 @@ def change_password(payload: dict = Body(None), authorization: str = Header(None
     _config['must_change_password'] = False
     _save_config()  # 持久化到配置文件，后端/容器重启后仍生效
     # 同步 noVNC：x11vnc 只认明文口令文件，改密后立即重写并让它重启读取
-    vnc_ok = _write_vnc_password(new_password)
+    vnc_ok = _write_password_file(new_password)
     if vnc_ok:
         _restart_vnc_server()
     # 修改密码后使所有已签发的 token 失效，强制重新登录

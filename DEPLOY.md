@@ -24,8 +24,10 @@
 | `CONFIG_FILE` | 脚本同目录 `config.json`（Docker 为 `/data/config.json`） | 配置文件：仅存管理员密码加盐 PBKDF2 哈希（改密后重启仍生效） |
 | `TASKS_FILE` | 脚本同目录 `tasks.json`（Docker 为 `/data/tasks.json`） | 定时任务持久化文件（含已停用任务） |
 
-> 以上均有默认值，一般无需配置；Docker 镜像已全部内置。`VNC_PASSWORD` 留空即自动生成随机密码
-> （首次启动打印在 `docker logs` 并保存到 `/data/.vnc_password`）；`ADMIN_PASSWORD` 设置后始终优先，可用于重置后台密码。
+> 以上均有默认值，一般无需配置；Docker 镜像已全部内置。`PASSWORD`（Web 后台与 noVNC 共用）
+> 留空即自动生成随机密码（首次启动打印在 `docker logs` 并保存到 `/data/.password`）；
+> 设置且符合要求（8-64 位、非弱口令）时首次启动直接沿用，不重置、不强制改密；
+> `PASSWORD` 设置后始终优先，也可用于重置忘记的后台密码（旧名 `ADMIN_PASSWORD` / `VNC_PASSWORD` 仍兼容）。
 
 ### 前端（构建/开发时）
 
@@ -189,5 +191,5 @@ server {
 - **单个浏览器实例**：后端同时只能驱动一个 Chrome（一个抖音账号）。多账号需多实例/多端口。
 - **内存态**：登录 token、调度 job 在内存中；`tasks.json` 只持久化定时/停用任务。后端重启后需重新「初始化浏览器」才恢复任务调度。
 - 后端与前端分离部署时，后端机器需能访问抖音，且建议固定出口 IP 避免风控。
-- 首次登录必须修改一次性密码；Web 后台与 noVNC 使用同一密码，改密后自动同步。忘记密码可设置 `ADMIN_PASSWORD` 环境变量后重启容器重置。
-- `config.json` / `tasks.json` 以 `0600` 落盘；`VNC_PASSWORD` 未设置时自动生成随机密码，noVNC 端口建议不要暴露到公网。
+- 首次登录必须修改一次性密码（若首次启动时已通过 `PASSWORD` 指定密码，则不强制改密）；Web 后台与 noVNC 使用同一密码，改密后自动同步。忘记密码可设置 `PASSWORD` 环境变量后重启容器重置。
+- `config.json` / `tasks.json` / `.password` 均以 `0600` 落盘；`PASSWORD` 未设置时自动生成随机密码，noVNC 端口建议不要暴露到公网。

@@ -28,7 +28,7 @@ FROM python:3.12-slim-bookworm
 
 USER root
 
-# 运行期环境变量：全部内置默认值，用户无需配置；仅 VNC_PASSWORD 由 docker-compose 显式传入
+# 运行期环境变量：全部内置默认值，用户无需配置；仅 PASSWORD（Web+noVNC 共用）可由 docker-compose 传入
 ENV PYTHONUNBUFFERED=1 \
     HOST=0.0.0.0 \
     PORT=9844 \
